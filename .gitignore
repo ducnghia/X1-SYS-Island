@@ -1,0 +1,11 @@
+/build/
+/dist/
+.vs/
+*.exe
+*.obj
+*.res
+*.pdb
+*.ilk
+*.log
+.env
+.env.*
