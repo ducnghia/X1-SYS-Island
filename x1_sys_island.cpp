@@ -10,6 +10,7 @@
 
 #include "resource.h"
 #include "telemetry.h"
+#include "cpu_identity.h"
 #include <thread>
 #include <mutex>
 #include <atomic>
@@ -34,6 +35,7 @@ constexpr int ISLAND_WIDTH = 560;
 constexpr int COMPACT_HEIGHT = 46;
 constexpr int EXPANDED_HEIGHT = 128;
 double g_cpuLoad = -1;
+const CpuIdentity g_cpuIdentity = detectCpuIdentity();
 constexpr COLORREF TEXT_COLOR = RGB(242, 242, 245);
 HWND g_hwnd;
 HANDLE g_singleInstanceMutex;
@@ -61,13 +63,14 @@ const UINT_PTR STATS_TIMER_ID = 1;
 const UINT_PTR HOVER_TIMER_ID = 2;
 const UINT_PTR RESHOW_TIMER_ID = 3;
 const UINT_PTR ANIMATION_TIMER_ID = 4;
+const UINT_PTR TELEMETRY_HEALTH_TIMER_ID = 5;
 const UINT ANIMATION_INTERVAL_MS = 100;
 const int HOTKEY_ID = 100;
 const UINT WM_SHOW_EXISTING_ISLAND = WM_USER + 1;
 const wchar_t SINGLE_INSTANCE_MUTEX[] = L"Global\\X1SYSIslandMutex";
 
 const BYTE ISLAND_OPACITY = 230;
-const wchar_t APP_VERSION[] = L"0.6.0";
+const wchar_t APP_VERSION[] = L"0.6.2";
 
 enum class LoadLevel {
     Normal,
@@ -84,14 +87,13 @@ struct HotkeyOption {
 };
 
 const HotkeyOption HOTKEYS[] = {
-    {MOD_CONTROL | MOD_SHIFT, 'D', L"Ctrl+Shift+D"},
-    {MOD_CONTROL | MOD_ALT, 'S', L"Ctrl+Alt+S"},
-    {MOD_CONTROL | MOD_SHIFT, 'S', L"Ctrl+Shift+S"}
+    {MOD_CONTROL | MOD_SHIFT, 'S', L"Ctrl+Shift+S"},
+    {MOD_CONTROL | MOD_SHIFT, 'D', L"Ctrl+Shift+D"}
 };
 const wchar_t* SETTINGS_KEY = L"Software\\X1SYSIsland";
 int loadHotkeyChoice() {
     DWORD value = 0, size = sizeof(value);
-    if (RegGetValueW(HKEY_CURRENT_USER, SETTINGS_KEY, L"HotkeyV2", RRF_RT_REG_DWORD,
+    if (RegGetValueW(HKEY_CURRENT_USER, SETTINGS_KEY, L"HotkeyV3", RRF_RT_REG_DWORD,
         nullptr, &value, &size) == ERROR_SUCCESS && value < ARRAYSIZE(HOTKEYS)) return value;
     return 0;
 }
@@ -99,7 +101,7 @@ void saveHotkeyChoice(int choice) {
     HKEY key;
     if (RegCreateKeyExW(HKEY_CURRENT_USER, SETTINGS_KEY, 0, nullptr, 0,
         KEY_SET_VALUE, nullptr, &key, nullptr) == ERROR_SUCCESS) {
-        RegSetValueExW(key, L"HotkeyV2", 0, REG_DWORD, reinterpret_cast<const BYTE*>(&choice), sizeof(choice));
+        RegSetValueExW(key, L"HotkeyV3", 0, REG_DWORD, reinterpret_cast<const BYTE*>(&choice), sizeof(choice));
         RegCloseKey(key);
     }
 }
@@ -301,13 +303,13 @@ void refreshDisplayCache() {
     const unsigned cpuPercent = stats.cpu >= 0 ? static_cast<unsigned>(std::lround(stats.cpu)) : 0;
     g_loadLevel = levelForPercent(std::max(cpuPercent, ramPercent));
     g_compactParts = {
-        stats.cpu >= 0 ? formatText(L"CPU %.0f%%", stats.cpu) : L"CPU N/A",
+        g_cpuIdentity.compact + (stats.cpu >= 0 ? formatText(L" %.0f%%", stats.cpu) : L" N/A"),
         stats.total ? formatText(L"RAM %.1f/%.1fG", stats.used/GIB, stats.total/GIB) : L"RAM N/A",
         stats.temperature >= 0 ? formatText(L"Temp %.0f\u00B0C", stats.temperature) : L"Temp N/A",
         stats.gpu >= 0 ? formatText(L"iGPU %.0f%%", stats.gpu) : L"iGPU N/A"
     };
     g_expandedParts = {
-        stats.cpu >= 0 ? formatText(L"CPU Load  %.0f%%", stats.cpu) : L"CPU Load  N/A",
+        g_cpuIdentity.expanded + (stats.cpu >= 0 ? formatText(L"  %.0f%%", stats.cpu) : L"  N/A"),
         stats.temperature >= 0 ? formatText(L"CPU Package  %.0f\u00B0C", stats.temperature) : L"CPU Package  N/A",
         stats.total ? formatText(L"RAM  %.1f/%.1f GiB (%u%%)", stats.used/GIB, stats.total/GIB, ramPercent) : L"RAM  N/A",
         stats.gpu >= 0 ? formatText(L"iGPU Load  %.0f%%", stats.gpu) : L"iGPU Load  N/A",
@@ -394,11 +396,12 @@ void render(HDC dc, const RECT& rc) {
         if (i == 0) {
             // Like AI Island's GPU name: color only the label, never the value.
             SIZE labelSize{};
-            GetTextExtentPoint32W(dc, L"CPU", 3, &labelSize);
+            const int labelLength = static_cast<int>(g_cpuIdentity.compact.size());
+                        GetTextExtentPoint32W(dc, g_cpuIdentity.compact.c_str(), labelLength, &labelSize);
             SetTextColor(dc, cpuLabelColor(g_cpuLoad, now));
-            TextOutW(dc, x, y, L"CPU", 3);
+            TextOutW(dc, x, y, g_cpuIdentity.compact.c_str(), labelLength);
             SetTextColor(dc, TEXT_COLOR);
-            TextOutW(dc, x + labelSize.cx, y, parts[i].c_str() + 3, static_cast<int>(parts[i].size()) - 3);
+            TextOutW(dc, x + labelSize.cx, y, parts[i].c_str() + labelLength, static_cast<int>(parts[i].size()) - labelLength);
         } else {
             TextOutW(dc, x, y, parts[i].c_str(), static_cast<int>(parts[i].size()));
         }
@@ -462,6 +465,10 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
 
     case WM_CREATE:
         // The worker delivers display updates; no independent polling timer.
+        // A logon task can begin before the desktop or telemetry provider is
+        // fully ready. Re-arm the worker occasionally so it self-recovers
+        // instead of remaining asleep after an early visibility race.
+        SetTimer(hwnd, TELEMETRY_HEALTH_TIMER_ID, 15000, nullptr);
         g_hotkeyChoice = loadHotkeyChoice();
         if (!registerToggleHotkey(hwnd, g_hotkeyChoice))
             MessageBoxW(hwnd, L"Hide/show shortcut is already in use. Choose another from the right-click menu. Launch this app again to restore it if hidden.", L"X1 SYS Island", MB_OK | MB_ICONWARNING);
@@ -473,7 +480,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
 
             refreshDisplayCache();
             InvalidateRect(hwnd,nullptr,FALSE);
-          } else if(wp==ANIMATION_TIMER_ID) {
+        } else if(wp==ANIMATION_TIMER_ID) {
               // A layered, non-activating HWND can miss a leave notification
               // after being shown under a stationary cursor. Reconcile on the
               // existing animation tick so the next real entry always rearms.
@@ -485,6 +492,8 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                   }
               }
               if (!g_onBattery) InvalidateRect(hwnd,nullptr,FALSE);
+        } else if (wp == TELEMETRY_HEALTH_TIMER_ID) {
+              updateSamplingPolicy(hwnd);
         } else if(wp==HOVER_TIMER_ID) {
             KillTimer(hwnd,HOVER_TIMER_ID);
             if(!g_contextOpen && !g_dragging && !g_userHidden && cursorInside(hwnd)) {
@@ -603,6 +612,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         KillTimer(hwnd, HOVER_TIMER_ID);
         KillTimer(hwnd, RESHOW_TIMER_ID);
         KillTimer(hwnd, ANIMATION_TIMER_ID);
+        KillTimer(hwnd, TELEMETRY_HEALTH_TIMER_ID);
         if (g_hotkeyRegistered) UnregisterHotKey(hwnd, HOTKEY_ID);
         PostQuitMessage(0); return 0;
     }
@@ -613,8 +623,16 @@ int WINAPI wWinMain(HINSTANCE h, HINSTANCE, LPWSTR, int) {
     SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
 
     g_singleInstanceMutex = CreateMutexW(nullptr, FALSE, SINGLE_INSTANCE_MUTEX);
-    if (g_singleInstanceMutex && GetLastError() == ERROR_ALREADY_EXISTS) {
-        CloseHandle(g_singleInstanceMutex);
+    const DWORD mutexError = GetLastError();
+    // Fail closed: inability to acquire the gate must never launch another worker.
+    // ACCESS_DENIED commonly means an instance at a different privilege level.
+    if (!g_singleInstanceMutex && mutexError != ERROR_ACCESS_DENIED) {
+        MessageBoxW(nullptr, L"Cannot establish the single-instance lock. SYS will not start.",
+            L"X1 SYS Island", MB_OK | MB_ICONERROR);
+        return 1;
+    }
+    if (!g_singleInstanceMutex || mutexError == ERROR_ALREADY_EXISTS) {
+        if (g_singleInstanceMutex) CloseHandle(g_singleInstanceMutex);
         g_singleInstanceMutex = nullptr;
         HWND existing{};
         for (int attempt = 0; attempt < 40 && !existing; ++attempt) {
@@ -717,6 +735,7 @@ int WINAPI wWinMain(HINSTANCE h, HINSTANCE, LPWSTR, int) {
     if (g_singleInstanceMutex) CloseHandle(g_singleInstanceMutex);
     return 0;
 }
+
 
 
 

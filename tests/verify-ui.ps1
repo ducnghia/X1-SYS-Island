@@ -39,14 +39,14 @@ if ($ai -ne [IntPtr]::Zero) {
   'AI Island present: no overlap'
 }
 function Toggle-Shortcut {
-  foreach ($key in @(0x11,0x10,0x44)) { [IslandUI]::keybd_event($key,0,0,[UIntPtr]::Zero) }
-  foreach ($key in @(0x44,0x10,0x11)) { [IslandUI]::keybd_event($key,0,2,[UIntPtr]::Zero) }
+  foreach ($key in @(0x11,0x10,0x53)) { [IslandUI]::keybd_event($key,0,0,[UIntPtr]::Zero) }
+  foreach ($key in @(0x53,0x10,0x11)) { [IslandUI]::keybd_event($key,0,2,[UIntPtr]::Zero) }
   Start-Sleep -Milliseconds 300
 }
 Toggle-Shortcut
-if ([IslandUI]::IsWindowVisible($hwnd)) { throw 'Ctrl+Shift+D did not hide SYS' }
+if ([IslandUI]::IsWindowVisible($hwnd)) { throw 'Ctrl+Shift+S did not hide SYS' }
 Toggle-Shortcut
-if (-not [IslandUI]::IsWindowVisible($hwnd)) { throw 'Ctrl+Shift+D did not show SYS' }
+if (-not [IslandUI]::IsWindowVisible($hwnd)) { throw 'Ctrl+Shift+S did not show SYS' }
 $second = Start-Process -FilePath $exe -WindowStyle Hidden -PassThru
 if (-not $second.WaitForExit(5000)) { throw 'Second instance did not exit' }
 [IslandUI]::SendMessage($hwnd,0x203,[IntPtr]::Zero,[IntPtr]::Zero) | Out-Null
@@ -120,3 +120,4 @@ try {
 } finally {
   [IslandUI]::SetCursorPos($originalCursor.X,$originalCursor.Y) | Out-Null
 }
+

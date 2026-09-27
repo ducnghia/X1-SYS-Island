@@ -1,64 +1,66 @@
-# X1 SYS Island v0.6.0
+# X1 SYS Island v0.6.2
 
-Windows x64 overlay cho Intel CPU, System RAM, Intel iGPU và nhiệt độ CPU trực tiếp. Giao diện Win32/GDI rộng **560 px** (bằng X1 AI Island: thu gọn 560×46, mở rộng 560×128), logo Intel và About 3S.
+X1 SYS Island is a Windows x64 Win32/GDI overlay for Intel CPU load, system RAM, Intel iGPU load, CPU Package temperature, and read-only fan telemetry. It matches X1 AI Island's 560 px layout: 560x46 collapsed and 560x128 expanded.
 
-## Chạy
+## Run
 
-Giữ **IntelMSR.bin** cạnh **X1-SYS-Island.exe**. Mở EXE, chấp nhận Administrator để đọc cảm biến CPU qua PawnIO đã cài trên máy. Không cần HWiNFO, LibreHardwareMonitor hay web server.
+Keep `IntelMSR.bin` beside `X1-SYS-Island.exe`. Start the executable and approve Administrator access so PawnIO can read the CPU sensor. HWiNFO, LibreHardwareMonitor, and a web server are not required.
 
-- Ctrl+Shift+D: ẩn/hiện. Có phím dự phòng trong menu nếu bị chiếm.
-- Hover 1 giây: ẩn 5 giây rồi hiện lại; phải rời chuột và vào lại để kích hoạt tiếp.
-- Kéo chuột trái để di chuyển; nhấp đúp mở/thu chi tiết.
-- Mở EXE lần nữa để khôi phục cửa sổ đang ẩn.
-- Chuột phải: mở/thu, reset về góc trái, ẩn, đổi shortcut, About, Exit.
+- `Ctrl+Shift+S`: show or hide the island (default shortcut).
+- `Ctrl+Shift+D`: the alternate shortcut exposed by the context menu.
+- Hover for one second: hide for five seconds, then show again. Leave and re-enter the island to trigger it again.
+- Left-drag to move; double-click to expand or collapse.
+- Starting the executable again restores the existing hidden instance.
+- Right-click for expand/collapse, reset position, hide, shortcut settings, About, and Exit.
 
-Phần mở rộng gồm ba dòng, hai cột:
+The expanded view has three rows and two columns:
 
-| Cột trái | Cột phải |
-|---|---|
+| Left | Right |
+| --- | --- |
 | CPU Load | CPU Package temperature |
-| RAM dùng/tổng và % | iGPU Load |
-| Fan Mode | Fan 1 và Fan 2 (RPM) |
+| RAM used/total and percentage | iGPU Load |
+| Fan Mode | Fan 1 and Fan 2 (RPM) |
 
-## Màu
+## Colors
 
-Viền dùng **max(CPU %, RAM %)**. Dưới 50%: xanh Intel, chu kỳ sáng 2,4 giây; 50–79%: vàng, 1,4 giây; từ 80%: đỏ, 1,05 giây. Ví dụ CPU 15%, RAM 60% thì viền vàng. Nhiệt độ, iGPU và quạt không tham gia tính mức viền.
+The border level is `max(CPU %, RAM %)`: below 50% is Intel blue with a 2.4-second pulse, 50-79% is yellow with a 1.4-second pulse, and 80% or higher is red with a 1.05-second pulse. Temperature, iGPU, and fan values do not affect the border level.
 
-Nhãn CPU trong thanh thu gọn dùng cùng logic với nhãn RTX 3080 của AI Island: chỉ dựa vào tải CPU, dưới 50% xanh Intel cố định, 50–79% vàng nhấp nhịp, từ 80% đỏ nhấp nhịp; thiếu dữ liệu thì xám. Số % CPU và các số liệu còn lại giữ trắng RGB(242,242,245). Logo Intel giữ màu gốc, About giữ màu như AI Island.
+The collapsed CPU label follows the same load-based color logic as the RTX 3080 label in X1 AI Island. The CPU percentage itself and all numeric values remain white (`RGB(242,242,245)`). The Intel logo keeps its original colors and the About dialog follows X1 AI Island styling.
 
-## Nguồn số liệu
+## Data sources
 
-- CPU: PDH Processor(_Total).
-- RAM vật lý: GlobalMemoryStatusEx; G trong thanh thu gọn tương ứng GiB.
-- Intel iGPU: DXGI xác định LUID, PDH GPU Engine cộng process trên cùng engine rồi chọn engine bận nhất.
-- CPU Package: MSR 0x1A2 (TjMax) trừ digital readout hợp lệ từ 0x1B1, qua module IntelMSR đã ký/PawnIO. Đã kiểm tra trên i9-11950H một package. Không đoán TjMax hoặc dùng nhiệt độ core/GPU thay thế.
-- Quạt: **chỉ đọc** mapping Global\X1FanTelemetryV1 version 2 do X1FanService xuất. FILE_MAP_READ ở cả mở mapping và map view; không có hàm yêu cầu/chuyển chế độ. Kiểm tra sequence ổn định và tuổi dữ liệu dưới 5 giây; nguồn lỗi/mất thì hiện N/A. Nhiệt độ CPU không phụ thuộc dịch vụ quạt.
+- **CPU load:** PDH `Processor(_Total)`.
+- **RAM:** `GlobalMemoryStatusEx`; the collapsed value is GiB.
+- **Intel iGPU:** DXGI identifies the adapter LUID, then PDH GPU Engine counters are aggregated per matching engine and the busiest engine is displayed.
+- **CPU Package temperature:** MSR `0x1A2` (TjMax) minus the valid digital readout from `0x1B1`, through the signed PawnIO/IntelMSR module. No HWiNFO, LibreHardwareMonitor, or web service is used.
+- **Fans:** read-only `Global\\X1FanTelemetryV1` version 2 mapping produced by X1FanService. The mapping is opened and mapped with read access only; sequence, version, and data age (under five seconds) are validated. Missing or stale data displays `N/A`.
 
-SYS không cài/chỉnh service, không điều khiển quạt. Chế độ quạt thay đổi bên AI Island sẽ tự phản ánh trên SYS. Nguồn thiếu/quyền thiếu hiện N/A.
+SYS does not install, start, stop, or control services or fans. Fan mode changes made by AI Island are reflected automatically. Missing data or insufficient permission is shown as `N/A`.
 
-## Build và cấu trúc
+## Build and test
 
-Visual Studio 2022 C++ Build Tools + Windows SDK. `build.bat` tạo EXE ở thư mục gốc, file trung gian ở build/. Có thể dùng `build.bat build\X1-SYS-Island.exe` khi bản cũ đang chạy. Thoát bản cũ trước khi chạy bản mới.
+Requirements: Visual Studio 2022 C++ Build Tools and the Windows SDK. `build.bat` writes the executable to the project root and intermediate files to `build/`. To build to another path, pass it as the first argument, for example `build.bat build\\X1-SYS-Island.exe`.
 
-- x1_sys_island.cpp: giao diện, About, shortcut và hover.
-- telemetry.h, cpu_temperature.h, fan_reader.h: bộ đọc nền, nhiệt độ và quạt chỉ đọc.
-- assets/: ảnh nguồn và bitmap nhúng; không cần khi chỉ chạy EXE.
-- licenses/: giấy phép/module source bắt buộc kèm khi phân phối.
-- tests/: kiểm tra chức năng; không được biên dịch vào app.
-- build/: output trung gian, chương trình test và preview mẫu; không có trong gói phân phối.
+Run `tests\\test.bat` for telemetry, fan mapping, and sensor conversion checks. `tests\\test.bat --require-temperature` requires an elevated Command Prompt or PowerShell. Run `tests\\test-hover.bat` for layout, border thresholds, hover timers, dragging, menu handling, and manual hide/show behavior. These tests use deterministic preview data where hardware access is not available.
 
-Chạy tests\test.bat để kiểm tra telemetry, tuổi/version dữ liệu quạt, chuyển đổi cảm biến. `tests\test.bat --require-temperature` cần PowerShell/Command Prompt Administrator. tests\test-hover.bat kiểm tra bố cục giá trị cực đại, viền, timer 1 giây/5 giây, rê lại, kéo/menu và ẩn thủ công; vị trí chuột được mô phỏng trên WndProc/cửa sổ/timer thật. Preview là dữ liệu mẫu để kiểm tra giao diện.
+## Project layout
 
-Đã build v0.5 không cảnh báo và khởi động lại bằng Administrator. Kiểm tra nhiệt độ CPU Package trực tiếp, CPU/RAM/iGPU, Fan Mode/Fan RPM thật, giao diện 560 px, About, Ctrl+Shift+D, không chồng AI Island và hover 1 giây/5 giây đều đạt. Ảnh kiểm tra giao diện thật ghi nhận CPU Package 60°C và Fan Mode BIOS Auto.
+- `x1_sys_island.cpp`: window, UI, About dialog, shortcuts, and hover behavior.
+- `telemetry.h`, `cpu_temperature.h`, `fan_reader.h`: sensor and read-only fan readers.
+- `assets/`: source images and embedded bitmap assets.
+- `licenses/`: licenses and required module source.
+- `tests/`: verification programs; not compiled into the application.
+- `build/`: generated intermediates and test binaries; not part of the release package.
 
-## v0.6.0 — giảm hoạt động nền và dung lượng
+## Packaging
 
-- Cắm sạc: lấy mẫu mỗi 1 giây. Chạy pin/Battery Saver hoặc không xác định được nguồn điện: mỗi 3 giây, màu viền/CPU đứng yên. Timer 1 giây trên pin chỉ giữ hành vi hover, không vẽ lại liên tục.
-- Khi ẩn (kể cả hover) hoặc suspend: worker đóng bộ đọc PDH/PawnIO và chờ sự kiện, không lấy mẫu định kỳ. Khi hiện lại cần một chu kỳ lấy mẫu để có số liệu mới; trong thời gian đó số cũ có thể còn hiển thị.
-- UI nhận thông báo khi có mẫu mới, bỏ timer đọc snapshot độc lập. Worker ưu tiên thấp hơn bình thường; bộ đệm GPU tái sử dụng.
-- Exit báo dừng ngay, chờ worker kết thúc rồi đóng event, mutex và tài nguyên GDI. Query PDH và handle PawnIO được đóng bởi destructor; mapping quạt được unmap/close sau mỗi lần đọc. Không tạo tiến trình con.
-- Không cài, start, stop hay xóa service. PawnIO và X1FanService là nguồn dùng chung có sẵn; đóng handle của SYS không đồng nghĩa unload driver PawnIO khỏi kernel. Không có cơ sở xác định SYS sở hữu riêng những service này, nên không tự dừng chúng khi Exit.
-- Build ưu tiên kích thước, tối ưu toàn chương trình và loại mã không dùng; bỏ thư viện đọc file C++ stream khỏi đường nạp IntelMSR. Vẫn dùng Win32 và giữ yêu cầu Administrator cho cảm biến.
-- `package.ps1` tạo gói chạy trong dist/, chỉ chứa EXE, IntelMSR.bin, README và giấy phép/source module bắt buộc. Không kèm build/, tests/, ảnh nguồn hoặc các ZIP phiên bản cũ. Không xóa bản lưu của người dùng.
+`package.ps1` builds an optimized executable and creates `dist/X1-SYS-Island-v0.6.2.zip` containing the executable, `IntelMSR.bin`, this README, third-party notices, and required licenses.
 
-Kiểm tra trên máy hiện tại: build không cảnh báo; test CPU/RAM/iGPU/quạt và giải mã cảm biến đạt. Test cửa sổ kiểm tra hover, ẩn/hiện, suspend/resume và tín hiệu dừng. Đọc nhiệt độ thật chưa xác nhận ở phiên không có quyền Administrator (trả N/A đúng dự kiến). Chưa đo watt, thời lượng pin hay khả năng unload của driver; IOCTL đồng bộ còn phụ thuộc driver trả về, không bảo đảm thời gian Exit nếu driver bị treo.
+## v0.6.2 changes
+
+- Enforces a single running instance and restores the existing window when launched again.
+- Uses `Ctrl+Shift+S` as the default shortcut and stores the setting in `HotkeyV3`.
+- Delays startup tasks by 30 seconds so PawnIO and the desktop are ready after logon.
+- A 15-second watchdog re-signals the worker if Windows delivers an early logon visibility event.
+- Reduces background work while hidden or suspended and shuts down the worker cleanly on exit.
+

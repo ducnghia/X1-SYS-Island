@@ -1,9 +1,25 @@
 #define NOMINMAX
 #include <windows.h>
 #include "../telemetry.h"
+#include "../cpu_identity.h"
+#pragma comment(lib, "advapi32.lib")
 #include <cstdio>
 #include <cassert>
 int wmain(int argc, wchar_t** argv) {
+    const auto i9 = normalizeCpuIdentity(L"11th Gen Intel(R) Core(TM) i9-11950H @ 2.60GHz");
+    assert(i9.compact == L"Core i9" && i9.expanded == L"Core i9 11950H");
+    assert(normalizeCpuIdentity(L"Intel(R) Core(TM) i7-8650U CPU @ 1.90GHz").expanded == L"Core i7 8650U");
+    assert(normalizeCpuIdentity(L"Intel Core i5-1240P").expanded == L"Core i5 1240P");
+    assert(normalizeCpuIdentity(L"Intel Core i3-8100").compact == L"Core i3");
+    assert(normalizeCpuIdentity(L"Intel(R) Core(TM) Ultra 7 155H").expanded == L"Core Ultra 7 155H");
+    assert(normalizeCpuIdentity(L"Intel Core 7 150U").expanded == L"Core 7 150U");
+    assert(normalizeCpuIdentity(L"Intel Core i9").expanded == L"Core i9");
+    assert(normalizeCpuIdentity(L"Intel Core Ultra").compact == L"CPU");
+    assert(normalizeCpuIdentity(L"Intel Core i99-123").compact == L"CPU");
+    assert(normalizeCpuIdentity(L"Unknown CPU").compact == L"CPU");
+    assert(normalizeCpuIdentity(L"").expanded == L"CPU");
+    const auto identity = detectCpuIdentity();
+    wprintf(L"CPU identity: %s / %s\n", identity.compact.c_str(), identity.expanded.c_str());
     assert(validCounter(PDH_CSTATUS_VALID_DATA));
     assert(!validCounter(PDH_CSTATUS_INVALID_DATA));
     assert(busiestEngine({{L"3D", 65}, {L"Copy", 40}}) == 65);

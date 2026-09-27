@@ -11,7 +11,7 @@ FONT 9, "Segoe UI"
 BEGIN
     CONTROL         "",IDC_ABOUT_LOGO,"Static",
                     SS_BITMAP | SS_CENTERIMAGE,10,5,185,43
-    LTEXT           "X1 SYS Island v0.6.0",IDC_ABOUT_VERSION,
+    LTEXT           "X1 SYS Island v0.6.1",IDC_ABOUT_VERSION,
                     8,48,189,11,SS_CENTER
     LTEXT           "Intel CPU, RAM and iGPU Monitor",IDC_ABOUT_SUBTITLE,
                     8,61,189,10,SS_CENTER
@@ -23,8 +23,8 @@ BEGIN
 END
 
 VS_VERSION_INFO VERSIONINFO
- FILEVERSION 0,6,0,0
- PRODUCTVERSION 0,6,0,0
+ FILEVERSION 0,6,2,0
+ PRODUCTVERSION 0,6,2,0
  FILEFLAGSMASK 0x3fL
 #ifdef _DEBUG
  FILEFLAGS 0x1L
@@ -41,12 +41,12 @@ BEGIN
         BEGIN
             VALUE "CompanyName", "3S Intersoft JSC"
             VALUE "FileDescription", "X1 SYS Island"
-            VALUE "FileVersion", "0.6.0.0"
+            VALUE "FileVersion", "0.6.2.0"
             VALUE "InternalName", "X1-SYS-Island"
             VALUE "LegalCopyright", "Developed with Codex and Curiosity"
             VALUE "OriginalFilename", "X1-SYS-Island.exe"
             VALUE "ProductName", "X1 SYS Island"
-            VALUE "ProductVersion", "0.6.0"
+            VALUE "ProductVersion", "0.6.2"
         END
     END
     BLOCK "VarFileInfo"
@@ -54,4 +54,5 @@ BEGIN
         VALUE "Translation", 0x409, 1200
     END
 END
+
 
