@@ -106,7 +106,11 @@ int main() {
     savePreview(true,L"build/preview-expanded.bmp");
     g_expanded=false;
     showIsland(g_hwnd);
-    enter();
+    g_autoHideOnHover=false;
+    enter(); pump(1200);
+    assert(IsWindowVisible(g_hwnd) && !g_trackingMouse);
+    g_autoHideOnHover=true;
+    leave(); enter();
     pump(700); assert(IsWindowVisible(g_hwnd));
     pump(500); assert(!IsWindowVisible(g_hwnd) && g_hoverHidden);
     // The OS-generated leave caused by hiding must not erase consumed hover.
@@ -115,7 +119,7 @@ int main() {
     pump(4500); assert(!IsWindowVisible(g_hwnd));
     pump(700); assert(IsWindowVisible(g_hwnd));
     pump(1200); assert(IsWindowVisible(g_hwnd));
-    puts("PASS: 1s hover, 5s hidden, visible again without repeated hide.");
+    puts("PASS: disabled hover auto-hide, 1s hover, 5s hidden, visible again without repeated hide.");
     // Missing WM_MOUSELEAVE after re-show: animation reconciliation rearms.
     testInside=false; pump(250);
     assert(!g_hoverConsumed && !g_trackingMouse);

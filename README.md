@@ -1,10 +1,10 @@
-# X1 SYS Island v0.6.3
+# X1 SYS Island v0.7.0
 
 X1 SYS Island is a Windows x64 Win32/GDI overlay for Intel CPU load, system RAM, Intel iGPU load, CPU Package temperature, and read-only fan telemetry. It matches X1 AI Island's 560 px layout: 560x46 collapsed and 560x128 expanded.
 
 ## Screenshots
 
-Screenshots of v0.6.3 running on Windows. Sensor values vary with hardware and current workload.
+Screenshots of v0.7.0 running on Windows. Sensor values vary with hardware and current workload.
 
 ### Collapsed island
 
@@ -20,7 +20,7 @@ Double-click to reveal CPU Package/TjMax, RAM details, and read-only fan mode an
 
 ### Context menu
 
-Right-click to change the view, reset the position, hide the island, choose a shortcut, or open About.
+Right-click to change the view, reset the position, hide the island, enable or disable hover auto-hide, choose a shortcut, or open About.
 
 ![X1 SYS Island context menu](docs/images/context-menu.png)
 
@@ -34,10 +34,10 @@ Keep `IntelMSR.bin` beside `X1-SYS-Island.exe`. Start the executable and approve
 
 - `Ctrl+Shift+S`: show or hide the island (default shortcut).
 - `Ctrl+Shift+D`: the alternate shortcut exposed by the context menu.
-- Hover for one second: hide for five seconds, then show again. Leave and re-enter the island to trigger it again.
+- Auto-hide on hover is enabled by default: hover for one second to hide for five seconds, then show again. Disable it from the context menu to keep the island visible.
 - Left-drag to move; double-click to expand or collapse.
 - Starting the executable again restores the existing hidden instance.
-- Right-click for expand/collapse, reset position, hide, shortcut settings, About, and Exit.
+- Right-click for expand/collapse, reset position, hide, hover auto-hide, shortcut settings, About, and Exit.
 
 The expanded view has three rows and two columns:
 
@@ -80,7 +80,12 @@ Run `tests\\test.bat` for telemetry, fan mapping, and sensor conversion checks. 
 
 ## Packaging
 
-`package.ps1` builds an optimized executable and creates `dist/X1-SYS-Island-v0.6.3.zip` containing the executable, `IntelMSR.bin`, this README, third-party notices, and required licenses.
+`package.ps1` builds an optimized executable and creates `dist/X1-SYS-Island-v0.7.0.zip` containing the executable, `IntelMSR.bin`, this README, third-party notices, and required licenses.
+
+## v0.7.0 changes
+
+- Keeps the visible island topmost after showing, resizing, dragging, and automatic re-show without background topmost polling.
+- Adds a persisted, default-enabled context-menu option to disable hover auto-hide.
 
 ## v0.6.3 changes
 

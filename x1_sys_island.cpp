@@ -56,6 +56,7 @@ bool g_trackingMouse = false;
 bool g_contextOpen = false;
 bool g_userHidden = false;
 bool g_hoverHidden = false;
+bool g_autoHideOnHover = true;
 bool g_hotkeyRegistered = false;
 int g_hotkeyChoice = 0;
 
@@ -70,7 +71,7 @@ const UINT WM_SHOW_EXISTING_ISLAND = WM_USER + 1;
 const wchar_t SINGLE_INSTANCE_MUTEX[] = L"Global\\X1SYSIslandMutex";
 
 const BYTE ISLAND_OPACITY = 230;
-const wchar_t APP_VERSION[] = L"0.6.3";
+const wchar_t APP_VERSION[] = L"0.7.0";
 
 enum class LoadLevel {
     Normal,
@@ -102,6 +103,21 @@ void saveHotkeyChoice(int choice) {
     if (RegCreateKeyExW(HKEY_CURRENT_USER, SETTINGS_KEY, 0, nullptr, 0,
         KEY_SET_VALUE, nullptr, &key, nullptr) == ERROR_SUCCESS) {
         RegSetValueExW(key, L"HotkeyV3", 0, REG_DWORD, reinterpret_cast<const BYTE*>(&choice), sizeof(choice));
+        RegCloseKey(key);
+    }
+}
+bool loadAutoHideOnHover() {
+    DWORD value = 1, size = sizeof(value);
+    if (RegGetValueW(HKEY_CURRENT_USER, SETTINGS_KEY, L"AutoHideOnHover", RRF_RT_REG_DWORD,
+        nullptr, &value, &size) == ERROR_SUCCESS) return value != 0;
+    return true;
+}
+void saveAutoHideOnHover(bool enabled) {
+    HKEY key;
+    if (RegCreateKeyExW(HKEY_CURRENT_USER, SETTINGS_KEY, 0, nullptr, 0,
+        KEY_SET_VALUE, nullptr, &key, nullptr) == ERROR_SUCCESS) {
+        DWORD value = enabled ? 1 : 0;
+        RegSetValueExW(key, L"AutoHideOnHover", 0, REG_DWORD, reinterpret_cast<const BYTE*>(&value), sizeof(value));
         RegCloseKey(key);
     }
 }
@@ -140,14 +156,18 @@ void stopAnimation(HWND hwnd) {
 }
 
 bool cursorInside(HWND hwnd);
+void ensureTopmostVisible(HWND hwnd) {
+    if (IsWindowVisible(hwnd) && !g_userHidden && !g_hoverHidden)
+        SetWindowPos(hwnd, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+}
 void showIsland(HWND hwnd) {
     g_userHidden=false;
     g_hoverHidden=false;
     KillTimer(hwnd,RESHOW_TIMER_ID);
     ShowWindow(hwnd,SW_SHOWNOACTIVATE);
-    SetWindowPos(hwnd,HWND_TOPMOST,0,0,0,0,SWP_NOMOVE|SWP_NOSIZE|SWP_NOACTIVATE|SWP_SHOWWINDOW);
+    ensureTopmostVisible(hwnd);
     KillTimer(hwnd,HOVER_TIMER_ID);
-    g_hoverConsumed=cursorInside(hwnd);
+    g_hoverConsumed=g_autoHideOnHover && cursorInside(hwnd);
     g_trackingMouse=g_hoverConsumed;
     if(g_trackingMouse) {
         TRACKMOUSEEVENT tme{sizeof(tme),TME_LEAVE,hwnd,0};
@@ -341,7 +361,8 @@ void setWindowSize() {
     int w = ISLAND_WIDTH;
     int h = g_expanded ? EXPANDED_HEIGHT : COMPACT_HEIGHT;
     RECT r{}; GetWindowRect(g_hwnd, &r);
-    SetWindowPos(g_hwnd, HWND_TOPMOST, r.left, r.top, w, h, SWP_NOACTIVATE | SWP_SHOWWINDOW);
+    SetWindowPos(g_hwnd, nullptr, r.left, r.top, w, h, SWP_NOZORDER | SWP_NOACTIVATE);
+    ensureTopmostVisible(g_hwnd);
     HRGN region = CreateRoundRectRgn(0, 0, w + 1, h + 1, 24, 24);
     if (!SetWindowRgn(g_hwnd, region, TRUE) && region) DeleteObject(region);
 }
@@ -473,6 +494,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         // instead of remaining asleep after an early visibility race.
         SetTimer(hwnd, TELEMETRY_HEALTH_TIMER_ID, 15000, nullptr);
         g_hotkeyChoice = loadHotkeyChoice();
+        g_autoHideOnHover = loadAutoHideOnHover();
         if (!registerToggleHotkey(hwnd, g_hotkeyChoice))
             MessageBoxW(hwnd, L"Hide/show shortcut is already in use. Choose another from the right-click menu. Launch this app again to restore it if hidden.", L"X1 SYS Island", MB_OK | MB_ICONWARNING);
         startAnimation(hwnd);
@@ -487,7 +509,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
               // A layered, non-activating HWND can miss a leave notification
               // after being shown under a stationary cursor. Reconcile on the
               // existing animation tick so the next real entry always rearms.
-              if(IsWindowVisible(hwnd) && !g_userHidden && !g_hoverHidden && !g_dragging && !g_contextOpen) {
+              if(g_autoHideOnHover && IsWindowVisible(hwnd) && !g_userHidden && !g_hoverHidden && !g_dragging && !g_contextOpen) {
                   if(!cursorInside(hwnd)) cancelHover(hwnd);
                   else if(!g_trackingMouse && !g_hoverConsumed) {
                       g_trackingMouse=true;
@@ -499,7 +521,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
               updateSamplingPolicy(hwnd);
         } else if(wp==HOVER_TIMER_ID) {
             KillTimer(hwnd,HOVER_TIMER_ID);
-            if(!g_contextOpen && !g_dragging && !g_userHidden && cursorInside(hwnd)) {
+            if(g_autoHideOnHover && !g_contextOpen && !g_dragging && !g_userHidden && cursorInside(hwnd)) {
                 g_hoverConsumed=true;
                 g_hoverHidden=true;
                 g_trackingMouse=false;
@@ -509,7 +531,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             }
         } else if(wp==RESHOW_TIMER_ID) {
             KillTimer(hwnd,RESHOW_TIMER_ID);
-            if(g_hoverHidden && !g_userHidden) {
+            if(g_autoHideOnHover && g_hoverHidden && !g_userHidden) {
                 showIsland(hwnd);
                 if(cursorInside(hwnd)) {
                     TRACKMOUSEEVENT tme{sizeof(tme),TME_LEAVE,hwnd,0};
@@ -537,8 +559,9 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     case WM_MOUSEMOVE:
         if(g_dragging && (wp & MK_LBUTTON)) {
             POINT p{GET_X_LPARAM(lp),GET_Y_LPARAM(lp)}; ClientToScreen(hwnd,&p);
-            SetWindowPos(hwnd,HWND_TOPMOST,p.x-g_dragStart.x,p.y-g_dragStart.y,0,0,SWP_NOSIZE|SWP_NOACTIVATE);
-        } else if(!g_trackingMouse && !g_contextOpen) {
+            SetWindowPos(hwnd,nullptr,p.x-g_dragStart.x,p.y-g_dragStart.y,0,0,SWP_NOZORDER|SWP_NOSIZE|SWP_NOACTIVATE);
+            ensureTopmostVisible(hwnd);
+        } else if(g_autoHideOnHover && !g_trackingMouse && !g_contextOpen) {
             TRACKMOUSEEVENT tme{sizeof(tme),TME_LEAVE,hwnd,0};
             TrackMouseEvent(&tme);
             g_trackingMouse=true;
@@ -552,7 +575,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         else cancelHover(hwnd);
         return 0;
     case WM_LBUTTONUP:
-        g_dragging=false; ReleaseCapture(); return 0;
+        g_dragging=false; ReleaseCapture(); ensureTopmostVisible(hwnd); return 0;
     case WM_RBUTTONDOWN:
         cancelHover(hwnd);
         return 0;
@@ -568,6 +591,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             hideLabel += L"N/A";
         }
         AppendMenuW(m, MF_STRING, 3, hideLabel.c_str());
+        AppendMenuW(m, MF_STRING | (g_autoHideOnHover ? MF_CHECKED : 0), 4, L"Auto-hide on hover");
         AppendMenuW(m, MF_SEPARATOR, 0, nullptr);
 
         HMENU shortcuts = CreatePopupMenu();
@@ -591,6 +615,11 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         if (cmd == 1) { g_expanded = !g_expanded; setWindowSize(); }
         if (cmd == 6) positionLeft(hwnd);
         if (cmd == 3) toggleIsland(hwnd);
+        if (cmd == 4) {
+            g_autoHideOnHover = !g_autoHideOnHover;
+            saveAutoHideOnHover(g_autoHideOnHover);
+            cancelHover(hwnd);
+        }
         if (cmd >= 100 && cmd < 100 + static_cast<int>(ARRAYSIZE(HOTKEYS))) selectHotkey(hwnd, cmd - 100);
 
         if (cmd == 5) showAbout();
@@ -723,6 +752,7 @@ int WINAPI wWinMain(HINSTANCE h, HINSTANCE, LPWSTR, int) {
     setWindowSize();
     positionLeft(g_hwnd);
     ShowWindow(g_hwnd, SW_SHOWNOACTIVATE);
+    ensureTopmostVisible(g_hwnd);
     startAnimation(g_hwnd);
     UpdateWindow(g_hwnd);
 
