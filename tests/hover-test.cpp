@@ -75,6 +75,7 @@ int main() {
         -30000,-30000,ISLAND_WIDTH,COMPACT_HEIGHT,nullptr,nullptr,cls.hInstance,nullptr);
     assert(g_hwnd);
     g_snapshot.cpu = 100; g_snapshot.gpu = 100; g_snapshot.temperature = 125;
+    g_snapshot.tjMax = 125; g_snapshot.distanceToTjMax = 0;
     g_snapshot.used = g_snapshot.total = 64ULL * 1024 * 1024 * 1024;
     g_snapshot.fans = {8191,8191,2,true};
     refreshDisplayCache();
@@ -97,6 +98,7 @@ int main() {
     assert(levelForPercent(80)==LoadLevel::Red);
     puts("PASS: 560px layout, six cells and border thresholds.");
     g_snapshot.cpu=17; g_snapshot.gpu=32; g_snapshot.temperature=54;
+    g_snapshot.tjMax=100; g_snapshot.distanceToTjMax=46;
     g_snapshot.used=32ULL*1024*1024*1024;
     g_snapshot.fans={6172,5382,2,true};
     refreshDisplayCache();

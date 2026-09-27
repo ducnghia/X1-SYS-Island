@@ -305,12 +305,15 @@ void refreshDisplayCache() {
     g_compactParts = {
         g_cpuIdentity.compact + (stats.cpu >= 0 ? formatText(L" %.0f%%", stats.cpu) : L" N/A"),
         stats.total ? formatText(L"RAM %.1f/%.1fG", stats.used/GIB, stats.total/GIB) : L"RAM N/A",
-        stats.temperature >= 0 ? formatText(L"Temp %.0f\u00B0C", stats.temperature) : L"Temp N/A",
+        stats.temperature >= 0 && stats.tjMax >= 0
+            ? formatText(L"C-Pkg %.0f\u00B0C/%d\u00B0C", stats.temperature, stats.tjMax) : L"C-Pkg N/A",
         stats.gpu >= 0 ? formatText(L"iGPU %.0f%%", stats.gpu) : L"iGPU N/A"
     };
     g_expandedParts = {
         g_cpuIdentity.expanded + (stats.cpu >= 0 ? formatText(L"  %.0f%%", stats.cpu) : L"  N/A"),
-        stats.temperature >= 0 ? formatText(L"CPU Package  %.0f\u00B0C", stats.temperature) : L"CPU Package  N/A",
+        stats.temperature >= 0 && stats.tjMax >= 0
+            ? formatText(L"CPU Package/TjMax  %.0f\u00B0C/%d\u00B0C", stats.temperature, stats.tjMax)
+            : L"CPU Package/TjMax  N/A",
         stats.total ? formatText(L"RAM  %.1f/%.1f GiB (%u%%)", stats.used/GIB, stats.total/GIB, ramPercent) : L"RAM  N/A",
         stats.gpu >= 0 ? formatText(L"iGPU Load  %.0f%%", stats.gpu) : L"iGPU Load  N/A",
         formatText(L"Fan Mode  %s", fanModeName(stats.fans)),

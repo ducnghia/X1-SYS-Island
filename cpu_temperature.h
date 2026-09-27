@@ -6,14 +6,21 @@
 
 #include <cstring>
 
-inline double decodePackageTemperature(ULONGLONG target, ULONGLONG thermal) {
+struct CpuPackageTemperature {
+    double package = -1;
+    int tjMax = -1;
+    int distanceToTjMax = -1;
+};
+
+inline CpuPackageTemperature decodePackageTemperature(ULONGLONG target, ULONGLONG thermal) {
     // Intel SDM: IA32_TEMPERATURE_TARGET[23:16] minus digital readout [22:16].
-    if (!(thermal & (1ULL << 31))) return -1;
+    if (!(thermal & (1ULL << 31))) return {};
     int tjMax = static_cast<int>((target >> 16) & 0xff);
     int delta = static_cast<int>((thermal >> 16) & 0x7f);
-    if (tjMax < 70 || tjMax > 125) return -1; // Never guess TjMax.
+    if (tjMax < 70 || tjMax > 125 || delta > tjMax) return {}; // Never guess TjMax.
     int value = tjMax - delta;
-    return value >= 0 && value <= 125 ? value : -1;
+    if (value < 0 || value > 125) return {};
+    return {static_cast<double>(value), tjMax, delta};
 }
 
 class CpuTemperature {
@@ -88,27 +95,27 @@ public:
     ~CpuTemperature() { close(); }
     CpuTemperature(const CpuTemperature&) = delete;
     CpuTemperature& operator=(const CpuTemperature&) = delete;
-    double sample(std::wstring& source) {
-        if (!supported) { source = L"CPU Package sensor unsupported by this Intel CPU"; return -1; }
+    CpuPackageTemperature sample(std::wstring& source) {
+        if (!supported) { source = L"CPU Package sensor unsupported by this Intel CPU"; return {}; }
         if (!open()) {
             source = lastError == ERROR_ACCESS_DENIED ? L"CPU temperature: run SYS as administrator (PawnIO)"
                 : L"CPU temperature: PawnIO / IntelMSR.bin unavailable (error " + std::to_wstring(lastError) + L")";
-            return -1;
+            return {};
         }
         // Keep both reads on one logical processor. This app targets a single-package laptop.
         GROUP_AFFINITY current{}, previous{};
         if (!GetThreadGroupAffinity(GetCurrentThread(), &current) || !current.Mask) {
-            source = L"CPU temperature: processor affinity unavailable"; return -1;
+            source = L"CPU temperature: processor affinity unavailable"; return {};
         }
         current.Mask &= (~current.Mask + 1); // First permitted processor in the current group.
         if (!SetThreadGroupAffinity(GetCurrentThread(), &current, &previous)) {
-            source = L"CPU temperature: cannot select processor"; return -1;
+            source = L"CPU temperature: cannot select processor"; return {};
         }
         ULONGLONG target = 0, thermal = 0;
         bool ok = readMsr(0x1a2, target) && readMsr(0x1b1, thermal);
         SetThreadGroupAffinity(GetCurrentThread(), &previous, nullptr);
-        double value = ok ? decodePackageTemperature(target, thermal) : -1;
-        if (value < 0) {
+        CpuPackageTemperature value = ok ? decodePackageTemperature(target, thermal) : CpuPackageTemperature{};
+        if (value.package < 0) {
             source = L"CPU Package sensor read unavailable (error " + std::to_wstring(lastError) + L")";
             if (!ok) close();
         } else source = L"CPU Package / Intel digital thermal sensor (direct)";

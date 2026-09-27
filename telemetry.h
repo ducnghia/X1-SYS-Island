@@ -22,6 +22,7 @@ using Microsoft::WRL::ComPtr;
 
 struct Stats {
     double cpu = -1, gpu = -1, temperature = -1;
+    int tjMax = -1, distanceToTjMax = -1;
     FanSnapshot fans;
     unsigned long long total = 0, used = 0;
     std::wstring gpuName = L"Intel integrated GPU not detected";
@@ -113,7 +114,10 @@ public:
             }
             primed = true;
         } else primed = false;
-        result.temperature = cpuTemperature.sample(result.tempSource);
+        const CpuPackageTemperature packageTemperature = cpuTemperature.sample(result.tempSource);
+        result.temperature = packageTemperature.package;
+        result.tjMax = packageTemperature.tjMax;
+        result.distanceToTjMax = packageTemperature.distanceToTjMax;
         return result;
     }
 };

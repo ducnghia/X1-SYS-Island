@@ -8,13 +8,13 @@ Screenshots of v0.6.2 running on Windows. Sensor values vary with hardware and c
 
 ### Collapsed island
 
-CPU load, RAM usage, CPU temperature, and iGPU load at a glance.
+CPU load, RAM usage, CPU Package/TjMax, and iGPU load at a glance.
 
 ![Collapsed X1 SYS Island](docs/images/collapsed.png)
 
 ### Expanded island
 
-Double-click to reveal CPU Package temperature, RAM details, and read-only fan mode and RPM.
+Double-click to reveal CPU Package/TjMax, RAM details, and read-only fan mode and RPM.
 
 ![Expanded X1 SYS Island](docs/images/expanded.png)
 
@@ -43,7 +43,7 @@ The expanded view has three rows and two columns:
 
 | Left | Right |
 | --- | --- |
-| CPU Load | CPU Package temperature |
+| CPU Load | CPU Package/TjMax |
 | RAM used/total and percentage | iGPU Load |
 | Fan Mode | Fan 1 and Fan 2 (RPM) |
 
@@ -58,7 +58,7 @@ The collapsed CPU label follows the same load-based color logic as the RTX 3080 
 - **CPU load:** PDH `Processor(_Total)`.
 - **RAM:** `GlobalMemoryStatusEx`; the collapsed value is GiB.
 - **Intel iGPU:** DXGI identifies the adapter LUID, then PDH GPU Engine counters are aggregated per matching engine and the busiest engine is displayed.
-- **CPU Package temperature:** MSR `0x1A2` (TjMax) minus the valid digital readout from `0x1B1`, through the signed PawnIO/IntelMSR module. No HWiNFO, LibreHardwareMonitor, or web service is used.
+- **CPU Package/TjMax:** MSR `0x1A2` provides the validated TjMax value and `0x1B1` provides the digital `Distance to TjMax` readout. The app calculates CPU Package as `TjMax - Distance to TjMax` and displays `C-Pkg <package>°C/<TjMax>°C` when collapsed. No HWiNFO, LibreHardwareMonitor, or web service is used.
 - **Fans:** read-only `Global\\X1FanTelemetryV1` version 2 mapping produced by X1FanService. The mapping is opened and mapped with read access only; sequence, version, and data age (under five seconds) are validated. Missing or stale data displays `N/A`.
 
 SYS does not install, start, stop, or control services or fans. Fan mode changes made by AI Island are reflected automatically. Missing data or insufficient permission is shown as `N/A`.
