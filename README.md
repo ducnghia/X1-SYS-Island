@@ -1,10 +1,10 @@
-# X1 SYS Island v0.6.2
+# X1 SYS Island v0.6.3
 
 X1 SYS Island is a Windows x64 Win32/GDI overlay for Intel CPU load, system RAM, Intel iGPU load, CPU Package temperature, and read-only fan telemetry. It matches X1 AI Island's 560 px layout: 560x46 collapsed and 560x128 expanded.
 
 ## Screenshots
 
-Screenshots of v0.6.2 running on Windows. Sensor values vary with hardware and current workload.
+Screenshots of v0.6.3 running on Windows. Sensor values vary with hardware and current workload.
 
 ### Collapsed island
 
@@ -80,7 +80,13 @@ Run `tests\\test.bat` for telemetry, fan mapping, and sensor conversion checks. 
 
 ## Packaging
 
-`package.ps1` builds an optimized executable and creates `dist/X1-SYS-Island-v0.6.2.zip` containing the executable, `IntelMSR.bin`, this README, third-party notices, and required licenses.
+`package.ps1` builds an optimized executable and creates `dist/X1-SYS-Island-v0.6.3.zip` containing the executable, `IntelMSR.bin`, this README, third-party notices, and required licenses.
+
+## v0.6.3 changes
+
+- CPU Package remains the primary thermal value.
+- Reads validated TjMax and Distance to TjMax directly from the Intel package thermal MSRs.
+- Shows `C-Pkg <package>°C/<TjMax>°C` when collapsed and `CPU Package/TjMax` when expanded.
 
 ## v0.6.2 changes
 

@@ -70,7 +70,7 @@ const UINT WM_SHOW_EXISTING_ISLAND = WM_USER + 1;
 const wchar_t SINGLE_INSTANCE_MUTEX[] = L"Global\\X1SYSIslandMutex";
 
 const BYTE ISLAND_OPACITY = 230;
-const wchar_t APP_VERSION[] = L"0.6.2";
+const wchar_t APP_VERSION[] = L"0.6.3";
 
 enum class LoadLevel {
     Normal,
