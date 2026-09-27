@@ -2,6 +2,32 @@
 
 X1 SYS Island is a Windows x64 Win32/GDI overlay for Intel CPU load, system RAM, Intel iGPU load, CPU Package temperature, and read-only fan telemetry. It matches X1 AI Island's 560 px layout: 560x46 collapsed and 560x128 expanded.
 
+## Screenshots
+
+Screenshots of v0.6.2 running on Windows. Sensor values vary with hardware and current workload.
+
+### Collapsed island
+
+CPU load, RAM usage, CPU temperature, and iGPU load at a glance.
+
+![Collapsed X1 SYS Island](docs/images/collapsed.png)
+
+### Expanded island
+
+Double-click to reveal CPU Package temperature, RAM details, and read-only fan mode and RPM.
+
+![Expanded X1 SYS Island](docs/images/expanded.png)
+
+### Context menu
+
+Right-click to change the view, reset the position, hide the island, choose a shortcut, or open About.
+
+![X1 SYS Island context menu](docs/images/context-menu.png)
+
+### About dialog
+
+![X1 SYS Island About dialog](docs/images/about.png)
+
 ## Run
 
 Keep `IntelMSR.bin` beside `X1-SYS-Island.exe`. Start the executable and approve Administrator access so PawnIO can read the CPU sensor. HWiNFO, LibreHardwareMonitor, and a web server are not required.
@@ -63,4 +89,3 @@ Run `tests\\test.bat` for telemetry, fan mapping, and sensor conversion checks. 
 - Delays startup tasks by 30 seconds so PawnIO and the desktop are ready after logon.
 - A 15-second watchdog re-signals the worker if Windows delivers an early logon visibility event.
 - Reduces background work while hidden or suspended and shuts down the worker cleanly on exit.
-
