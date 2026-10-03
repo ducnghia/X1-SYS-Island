@@ -7,6 +7,7 @@
 #include "fan_reader.h"
 #include <wrl/client.h>
 #include <string>
+#include <string_view>
 #include <vector>
 #include <map>
 #include <algorithm>
@@ -36,6 +37,24 @@ inline double busiestEngine(const std::map<std::wstring, double>& engines) {
     double result = 0;
     for (const auto& engine : engines) result = (std::max)(result, engine.second);
     return (std::clamp)(result, 0.0, 100.0);
+}
+
+inline void accumulateGpuEngine(std::map<std::wstring, double>& engines,
+    const PDH_FMT_COUNTERVALUE_ITEM_W& item, const std::vector<std::wstring>& intelLuids) {
+    if (!validCounter(item.FmtValue.CStatus) || !item.szName) return;
+    const std::wstring_view name(item.szName);
+    for (const auto& luid : intelLuids) {
+        const auto start = std::search(name.begin(), name.end(), luid.begin(), luid.end(),
+            [](wchar_t a, wchar_t b) { return std::towlower(a) == std::towlower(b); });
+        if (start == name.end()) continue;
+        // Only matching adapters allocate a key. Retain the full physical-engine
+        // suffix so processes combine without merging adapters or distinct engines.
+        std::wstring key(start, name.end());
+        std::transform(key.begin(), key.end(), key.begin(),
+            [](wchar_t c) { return static_cast<wchar_t>(std::towlower(c)); });
+        engines[std::move(key)] += (std::max)(0.0, item.FmtValue.doubleValue);
+        break;
+    }
 }
 
 // Direct CPU sensor and performance counters run on the worker, never the UI.
@@ -75,6 +94,9 @@ public:
         }
     }
     ~Telemetry() { if (query) PdhCloseQuery(query); }
+    void reprime() {
+        primed = query && PdhCollectQueryData(query) == ERROR_SUCCESS;
+    }
     Stats sample() {
         Stats result;
         result.fans = readFans();
@@ -95,19 +117,8 @@ public:
                     auto items = reinterpret_cast<PDH_FMT_COUNTERVALUE_ITEM_W*>(gpuBuffer.data());
                     if (PdhGetFormattedCounterArrayW(gpuCounter, PDH_FMT_DOUBLE, &bytes, &count, items) == ERROR_SUCCESS) {
                         std::map<std::wstring, double> engines;
-                        for (DWORD i = 0; i < count; ++i) {
-                            if (!validCounter(items[i].FmtValue.CStatus)) continue;
-                            std::wstring name = items[i].szName;
-                            std::transform(name.begin(), name.end(), name.begin(), [](wchar_t c) { return static_cast<wchar_t>(std::towlower(c)); });
-                            for (const auto& luid : intelLuids) {
-                                auto start = name.find(luid);
-                                if (start != std::wstring::npos) {
-                                    // Sum processes sharing a physical engine, then use busiest engine.
-                                    engines[name.substr(start)] += (std::max)(0.0, items[i].FmtValue.doubleValue);
-                                    break;
-                                }
-                            }
-                        }
+                        for (DWORD i = 0; i < count; ++i)
+                            accumulateGpuEngine(engines, items[i], intelLuids);
                         if (!engines.empty()) result.gpu = busiestEngine(engines);
                     }
                 }

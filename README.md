@@ -1,4 +1,4 @@
-# X1 SYS Island v0.7.0
+# X1 SYS Island v0.8.1
 
 X1 SYS Island is a Windows x64 Win32/GDI overlay for Intel CPU load, system RAM, Intel iGPU load, CPU Package temperature, and read-only fan telemetry. It matches X1 AI Island's 560 px layout: 560x46 collapsed and 560x128 expanded.
 
@@ -80,7 +80,24 @@ Run `tests\\test.bat` for telemetry, fan mapping, and sensor conversion checks. 
 
 ## Packaging
 
-`package.ps1` builds an optimized executable and creates `dist/X1-SYS-Island-v0.7.0.zip` containing the executable, `IntelMSR.bin`, this README, third-party notices, and required licenses.
+`package.ps1` builds an optimized executable and creates `dist/X1-SYS-Island-v0.8.1.zip` containing the executable, `IntelMSR.bin`, this README, third-party notices, and required licenses.
+
+## v0.8.1 changes
+
+- Fixes repaint flicker with a reusable off-screen back buffer and a single blit to the window.
+- Limits animation repaints to the border and animated CPU label, avoiding unnecessary redraws of unchanged text and the Intel logo.
+- Recreates the back buffer after size or display changes and releases it on shutdown.
+- Extends deterministic hover/rendering tests to cover partial repainting and GDI resource reuse.
+
+## v0.8.0 changes
+
+- Caches compact text layout and reuses GDI resources during animation.
+- Retains telemetry for a bounded hover-hide grace period without sampling while hidden; re-primes rate counters on return. Manual hiding and suspension release resources without the grace period.
+- Avoids unchanged-policy worker wakeups and preserves sampling deadlines.
+- Filters unrelated GPU counter names without allocating temporary strings.
+- Fixes sensor retry deadlines, malformed-response diagnostics, and affinity-restoration checks.
+- Adds deterministic sensor regression tests (`tests\\test-sensor-optimization.bat`) and worker/layout lifecycle checks.
+- Keeps read-only fan mapping reopening and uncached TjMax for correctness. No measured battery-saving or speedup claim is made.
 
 ## v0.7.0 changes
 

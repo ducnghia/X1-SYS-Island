@@ -38,7 +38,7 @@ class CpuTemperature {
         DWORD returned = 0;
         BOOL ok = DeviceIoControl(device, 0xA1B22104, packet, sizeof(packet),
             &value, sizeof(value), &returned, nullptr);
-        lastError = ok ? ERROR_SUCCESS : GetLastError();
+        lastError = !ok ? GetLastError() : returned != sizeof(value) ? ERROR_BAD_LENGTH : ERROR_SUCCESS;
         return ok && returned == sizeof(value);
     }
     bool open() {
@@ -73,7 +73,7 @@ class CpuTemperature {
         DWORD returned = 0;
         if (!DeviceIoControl(device, 0xA1B22084, blob.data(), static_cast<DWORD>(blob.size()),
                 nullptr, 0, &returned, nullptr)) {
-            lastError = GetLastError(); close(); return false;
+            lastError = GetLastError(); close(); retryAt = GetTickCount64() + 10000; return false;
         }
         return true;
     }
@@ -113,11 +113,22 @@ public:
         }
         ULONGLONG target = 0, thermal = 0;
         bool ok = readMsr(0x1a2, target) && readMsr(0x1b1, thermal);
-        SetThreadGroupAffinity(GetCurrentThread(), &previous, nullptr);
+        const BOOL restored = SetThreadGroupAffinity(GetCurrentThread(), &previous, nullptr);
+        const DWORD restoreError = restored ? ERROR_SUCCESS : GetLastError();
+        if (!ok) {
+            close();
+            retryAt = GetTickCount64() + 10000;
+        }
+        if (!restored) {
+            source = L"CPU temperature: cannot restore processor affinity (error " +
+                std::to_wstring(restoreError) + L")";
+            return {};
+        }
         CpuPackageTemperature value = ok ? decodePackageTemperature(target, thermal) : CpuPackageTemperature{};
         if (value.package < 0) {
-            source = L"CPU Package sensor read unavailable (error " + std::to_wstring(lastError) + L")";
-            if (!ok) close();
+            source = ok ? L"CPU Package sensor returned invalid thermal data"
+                : lastError == ERROR_BAD_LENGTH ? L"CPU Package sensor returned malformed response (error " + std::to_wstring(lastError) + L")"
+                : L"CPU Package sensor read unavailable (error " + std::to_wstring(lastError) + L")";
         } else source = L"CPU Package / Intel digital thermal sensor (direct)";
         return value;
     }

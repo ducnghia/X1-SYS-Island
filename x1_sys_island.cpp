@@ -5,6 +5,7 @@
 #include <string>
 #include <algorithm>
 #include <array>
+#include <vector>
 #include <cstdarg>
 #include <cmath>
 
@@ -27,6 +28,38 @@ HANDLE g_stopEvent;
 HANDLE g_policyEvent;
 std::atomic<bool> g_sampling{false};
 std::atomic<DWORD> g_sampleInterval{1000};
+enum class SamplingMode { Released, Active, Hover };
+struct SamplingPolicy {
+    SamplingMode mode = SamplingMode::Released;
+    DWORD interval = 1000;
+    ULONGLONG hoverDeadline = 0;
+    unsigned resumeEpoch = 0, releaseEpoch = 0;
+};
+std::mutex g_policyMutex;
+SamplingPolicy g_policy;
+constexpr DWORD HOVER_RETENTION_MS = 6500;
+
+SamplingPolicy samplingPolicy() {
+    std::lock_guard<std::mutex> guard(g_policyMutex);
+    return g_policy;
+}
+void publishSamplingPolicy(bool visible);
+
+// Deadlines survive spurious policy wakes; epochs preserve transitions even
+// when an auto-reset event coalesces a quick hide/show or suspend/resume.
+struct WorkerSchedule {
+    ULONGLONG nextSample = 0;
+    unsigned resumeEpoch = 0, releaseEpoch = 0;
+    bool retained = false;
+    bool mustRelease(const SamplingPolicy& policy, ULONGLONG now) const {
+        return policy.mode == SamplingMode::Released || releaseEpoch != policy.releaseEpoch ||
+            ((retained || resumeEpoch != policy.resumeEpoch) &&
+                policy.hoverDeadline && now >= policy.hoverDeadline);
+    }
+    DWORD delayUntil(ULONGLONG deadline, ULONGLONG now) const {
+        return deadline > now ? static_cast<DWORD>(std::min<ULONGLONG>(deadline - now, INFINITE - 1)) : 0;
+    }
+};
 bool g_onBattery = false;
 bool g_suspended = false;
 constexpr UINT WM_STATS_READY = WM_APP + 1;
@@ -43,10 +76,20 @@ HANDLE g_singleInstanceMutex;
 HFONT g_metricsFont;
 HFONT g_smallFont;
 HBITMAP g_intelLogo;
+HDC g_logoDc;
+HGDIOBJ g_logoPrevious;
+void releaseLogoDc() {
+    if (!g_logoDc) return;
+    SelectObject(g_logoDc, g_logoPrevious);
+    DeleteDC(g_logoDc);
+    g_logoDc = nullptr;
+    g_logoPrevious = nullptr;
+}
 HBRUSH g_backgroundBrush;
 std::array<std::wstring, 4> g_compactParts;
 
-std::array<std::wstring, 6> g_expandedParts;
+std::array<std::wstring, 7> g_expandedParts;
+
 
 POINT g_dragStart;
 bool g_dragging = false;
@@ -71,7 +114,7 @@ const UINT WM_SHOW_EXISTING_ISLAND = WM_USER + 1;
 const wchar_t SINGLE_INSTANCE_MUTEX[] = L"Global\\X1SYSIslandMutex";
 
 const BYTE ISLAND_OPACITY = 230;
-const wchar_t APP_VERSION[] = L"0.7.0";
+const wchar_t APP_VERSION[] = L"0.8.1";
 
 enum class LoadLevel {
     Normal,
@@ -80,6 +123,8 @@ enum class LoadLevel {
 };
 
 LoadLevel g_loadLevel = LoadLevel::Normal;
+void invalidateDisplayChanges(const std::array<std::wstring, 4>& compact,
+    const std::array<std::wstring, 7>& expanded, double cpu, LoadLevel level);
 
 struct HotkeyOption {
     UINT modifiers;
@@ -139,12 +184,29 @@ void selectHotkey(HWND hwnd, int choice) {
         MessageBoxW(hwnd, L"Shortcut is already used. Previous shortcut retained.", L"X1 SYS Island", MB_OK | MB_ICONWARNING);
     }
 }
+void publishSamplingPolicy(bool visible) {
+    const auto mode = g_suspended || g_userHidden ? SamplingMode::Released
+        : visible ? SamplingMode::Active
+        : g_hoverHidden ? SamplingMode::Hover : SamplingMode::Released;
+    const DWORD interval = g_onBattery ? 3000 : 1000;
+    std::lock_guard<std::mutex> guard(g_policyMutex);
+    g_sampling.store(mode == SamplingMode::Active);
+    g_sampleInterval.store(interval);
+    if (g_policy.mode == mode && g_policy.interval == interval) return;
+    if (g_policy.mode != mode) {
+        if (mode == SamplingMode::Hover)
+            g_policy.hoverDeadline = GetTickCount64() + HOVER_RETENTION_MS;
+        if (mode == SamplingMode::Active) ++g_policy.resumeEpoch;
+        if (mode == SamplingMode::Released) ++g_policy.releaseEpoch;
+    }
+    g_policy.mode = mode;
+    g_policy.interval = interval;
+    if (g_policyEvent) SetEvent(g_policyEvent);
+}
 void updateSamplingPolicy(HWND hwnd) {
     SYSTEM_POWER_STATUS power{};
     g_onBattery = !GetSystemPowerStatus(&power) || power.ACLineStatus != 1 || power.SystemStatusFlag == 1;
-    g_sampleInterval.store(g_onBattery ? 3000 : 1000);
-    g_sampling.store(IsWindowVisible(hwnd) && !g_suspended);
-    if (g_policyEvent) SetEvent(g_policyEvent);
+    publishSamplingPolicy(IsWindowVisible(hwnd) != FALSE);
 }
 void startAnimation(HWND hwnd) {
     if(IsWindowVisible(hwnd) && !g_userHidden && !g_hoverHidden)
@@ -317,28 +379,34 @@ void refreshDisplayCache() {
         std::lock_guard<std::mutex> guard(g_statsMutex);
         stats = g_snapshot;
     }
+    const auto oldCompact = g_compactParts;
+    const auto oldExpanded = g_expandedParts;
+    const auto oldCpu = g_cpuLoad;
+    const auto oldLevel = g_loadLevel;
     g_cpuLoad = stats.cpu;
     constexpr double GIB = 1073741824.0;
     const unsigned ramPercent = stats.total ? static_cast<unsigned>(100 * stats.used / stats.total) : 0;
     const unsigned cpuPercent = stats.cpu >= 0 ? static_cast<unsigned>(std::lround(stats.cpu)) : 0;
     g_loadLevel = levelForPercent(std::max(cpuPercent, ramPercent));
     g_compactParts = {
-        g_cpuIdentity.compact + (stats.cpu >= 0 ? formatText(L" %.0f%%", stats.cpu) : L" N/A"),
-        stats.total ? formatText(L"RAM %.1f/%.1fG", stats.used/GIB, stats.total/GIB) : L"RAM N/A",
+        stats.cpu >= 0 ? formatText(L"%.0f%%", stats.cpu) : L"N/A",
+        stats.total ? formatText(L"%.1f/%.1fG", stats.used/GIB, stats.total/GIB) : L"N/A",
         stats.temperature >= 0 && stats.tjMax >= 0
-            ? formatText(L"C-Pkg %.0f\u00B0C/%d\u00B0C", stats.temperature, stats.tjMax) : L"C-Pkg N/A",
-        stats.gpu >= 0 ? formatText(L"iGPU %.0f%%", stats.gpu) : L"iGPU N/A"
+            ? formatText(L"%.0f\u00B0C/%d\u00B0C", stats.temperature, stats.tjMax) : L"N/A",
+        stats.gpu >= 0 ? formatText(L"%.0f%%", stats.gpu) : L"N/A"
     };
     g_expandedParts = {
-        g_cpuIdentity.expanded + (stats.cpu >= 0 ? formatText(L"  %.0f%%", stats.cpu) : L"  N/A"),
+        g_compactParts[0],
         stats.temperature >= 0 && stats.tjMax >= 0
-            ? formatText(L"CPU Package/TjMax  %.0f\u00B0C/%d\u00B0C", stats.temperature, stats.tjMax)
-            : L"CPU Package/TjMax  N/A",
-        stats.total ? formatText(L"RAM  %.1f/%.1f GiB (%u%%)", stats.used/GIB, stats.total/GIB, ramPercent) : L"RAM  N/A",
-        stats.gpu >= 0 ? formatText(L"iGPU Load  %.0f%%", stats.gpu) : L"iGPU Load  N/A",
-        formatText(L"Fan Mode  %s", fanModeName(stats.fans)),
-        stats.fans.ok ? formatText(L"Fan 1 %lu RPM | Fan 2 %lu RPM", stats.fans.fan1, stats.fans.fan2) : L"Fan 1 N/A | Fan 2 N/A"
+            ? formatText(L"%.0f\u00B0C/%d\u00B0C", stats.temperature, stats.tjMax)
+            : L"N/A",
+        stats.total ? formatText(L"%.1f/%.1f GiB (%u%%)", stats.used/GIB, stats.total/GIB, ramPercent) : L"N/A",
+        g_compactParts[3],
+        fanModeName(stats.fans),
+        stats.fans.ok ? formatText(L"%lu RPM", stats.fans.fan1) : L"N/A",
+        stats.fans.ok ? formatText(L"%lu RPM", stats.fans.fan2) : L"N/A"
     };
+    invalidateDisplayChanges(oldCompact, oldExpanded, oldCpu, oldLevel);
 }
 void positionLeft(HWND hwnd) {
     MONITORINFO info{sizeof(info)};
@@ -367,107 +435,181 @@ void setWindowSize() {
     if (!SetWindowRgn(g_hwnd, region, TRUE) && region) DeleteObject(region);
 }
 
-void drawIntelLogo(HDC dc, int x, int y) {
-    if (!g_intelLogo) return;
-    HDC logoDc = CreateCompatibleDC(dc);
-    HGDIOBJ old = SelectObject(logoDc, g_intelLogo);
-    BitBlt(dc, x, y, 38, 28, logoDc, 0, 0, SRCCOPY);
-    SelectObject(logoDc, old);
-    DeleteDC(logoDc);
+struct TextCell { RECT label, value; };
+// Geometry never depends on live digits. Long identities/values are clipped
+// with ellipsis within their own cell rather than shifting their neighbours.
+const std::array<TextCell, 4> COMPACT_CELLS{{
+    {{58, 9, 112, 37}, {114, 9, 155, 37}},
+    {{159, 9, 190, 37}, {192, 9, 286, 37}},
+    {{294, 9, 336, 37}, {338, 9, 444, 37}},
+    {{452, 9, 486, 37}, {488, 9, 548, 37}}
+}};
+const std::array<TextCell, 7> EXPANDED_CELLS{{
+    {{14, 46, 222, 71}, {224, 46, 276, 71}},
+    {{286, 46, 421, 71}, {423, 46, 548, 71}},
+    {{14, 71, 48, 96}, {50, 71, 276, 96}},
+    {{286, 71, 358, 96}, {360, 71, 548, 96}},
+    {{14, 96, 82, 121}, {84, 96, 276, 121}},
+    {{286, 96, 324, 121}, {326, 96, 414, 121}},
+    {{420, 96, 458, 121}, {460, 96, 548, 121}}
+}};
+const std::array<std::wstring, 4> COMPACT_LABELS{g_cpuIdentity.compact, L"RAM", L"C-Pkg", L"iGPU"};
+const std::array<std::wstring, 7> EXPANDED_LABELS{g_cpuIdentity.expanded,
+    L"CPU Package/TjMax", L"RAM", L"iGPU Load", L"Fan Mode", L"Fan 1", L"Fan 2"};
+
+std::array<RECT, 4> borderRects(const RECT& rc) {
+    // Edge strips cover the rounded corners without touching the text/logo.
+    return {{{0, 0, rc.right, 9}, {0, rc.bottom - 7, rc.right, rc.bottom},
+        {0, 9, 10, rc.bottom - 7}, {rc.right - 10, 9, rc.right, rc.bottom - 7}}};
+}
+void invalidateBorder(HWND hwnd) {
+    RECT rc{}; GetClientRect(hwnd, &rc);
+    for (const auto& rect : borderRects(rc)) InvalidateRect(hwnd, &rect, FALSE);
+}
+void invalidateAnimation(HWND hwnd) {
+    invalidateBorder(hwnd);
+    if (g_cpuLoad >= 49.5) InvalidateRect(hwnd, &COMPACT_CELLS[0].label, FALSE);
+}
+void invalidateDisplayChanges(const std::array<std::wstring, 4>& compact,
+    const std::array<std::wstring, 7>& expanded, double cpu, LoadLevel level) {
+    if (!g_hwnd) return;
+    for (size_t i = 0; i < compact.size(); ++i)
+        if (compact[i] != g_compactParts[i]) InvalidateRect(g_hwnd, &COMPACT_CELLS[i].value, FALSE);
+    if (g_expanded) for (size_t i = 0; i < expanded.size(); ++i)
+        if (expanded[i] != g_expandedParts[i]) InvalidateRect(g_hwnd, &EXPANDED_CELLS[i].value, FALSE);
+    const auto now = g_onBattery ? 0 : GetTickCount64();
+    if (cpuLabelColor(cpu, now) != cpuLabelColor(g_cpuLoad, now))
+        InvalidateRect(g_hwnd, &COMPACT_CELLS[0].label, FALSE);
+    if (level != g_loadLevel) invalidateBorder(g_hwnd);
 }
 
-void render(HDC dc, const RECT& rc) {
-    FillRect(dc, &rc, g_backgroundBrush);
+struct BackBuffer {
+    HDC dc = nullptr;
+    HBITMAP bitmap = nullptr;
+    HGDIOBJ previous = nullptr;
+    int width = 0, height = 0;
+    bool valid = false;
+    BackBuffer() = default;
+    BackBuffer(const BackBuffer&) = delete;
+    BackBuffer& operator=(const BackBuffer&) = delete;
+    ~BackBuffer() { release(); }
+    void release() {
+        if (dc && previous) SelectObject(dc, previous);
+        if (bitmap) DeleteObject(bitmap);
+        if (dc) DeleteDC(dc);
+        dc = nullptr; bitmap = nullptr; previous = nullptr;
+        width = height = 0; valid = false;
+    }
+    bool ensure(HDC target, int w, int h) {
+        if (dc && width == w && height == h) return true;
+        release();
+        if (w <= 0 || h <= 0) return false;
+        dc = CreateCompatibleDC(target);
+        if (dc) bitmap = CreateCompatibleBitmap(target, w, h);
+        if (bitmap) previous = SelectObject(dc, bitmap);
+        if (!previous || previous == HGDI_ERROR) { previous = nullptr; release(); return false; }
+        width = w; height = h;
+        return true;
+    }
+};
+BackBuffer g_backBuffer;
+
+void drawIntelLogo(HDC dc, int x, int y) {
+    if (!g_intelLogo) return;
+    if (!g_logoDc) {
+        HDC source = CreateCompatibleDC(dc);
+        if (!source) return;
+        HGDIOBJ previous = SelectObject(source, g_intelLogo);
+        if (!previous || previous == HGDI_ERROR) { DeleteDC(source); return; }
+        g_logoDc = source;
+        g_logoPrevious = previous;
+    }
+    BitBlt(dc, x, y, 38, 28, g_logoDc, 0, 0, SRCCOPY);
+}
+
+void render(HDC dc, const RECT& rc, HRGN damage = nullptr) {
+    const int saved = SaveDC(dc);
+    if (!saved) return;
+    if (damage) {
+        ExtSelectClipRgn(dc, damage, RGN_AND);
+        const DWORD bytes = GetRegionData(damage, 0, nullptr);
+        std::vector<DWORD> storage((bytes + sizeof(DWORD) - 1) / sizeof(DWORD));
+        auto data = reinterpret_cast<RGNDATA*>(storage.data());
+        if (bytes && GetRegionData(damage, bytes, data)) {
+            const auto rects = reinterpret_cast<const RECT*>(data->Buffer);
+            for (DWORD i = 0; i < data->rdh.nCount; ++i) FillRect(dc, &rects[i], g_backgroundBrush);
+        }
+    } else FillRect(dc, &rc, g_backgroundBrush);
 
     ULONGLONG now = g_onBattery ? 0 : GetTickCount64();
-    HPEN border = CreatePen(PS_SOLID, 1, animatedBorderColor(g_loadLevel, now));
-    HGDIOBJ oldPen = SelectObject(dc, border);
+    bool borderVisible = false;
+    for (const auto& rect : borderRects(rc)) borderVisible = borderVisible || RectVisible(dc, &rect);
+    if (borderVisible) {
+    HGDIOBJ oldPen = SelectObject(dc, GetStockObject(DC_PEN));
+    COLORREF oldPenColor = SetDCPenColor(dc, animatedBorderColor(g_loadLevel, now));
     HGDIOBJ oldBrush = SelectObject(dc, GetStockObject(NULL_BRUSH));
     RoundRect(dc, 1, 1, rc.right - 1, rc.bottom - 1, 24, 24);
     SelectObject(dc, oldBrush);
     SelectObject(dc, oldPen);
-    DeleteObject(border);
+    SetDCPenColor(dc, oldPenColor);
+    }
 
     SetBkMode(dc, TRANSPARENT);
-    drawIntelLogo(dc, 10, 9);
-    SetTextColor(dc, TEXT_COLOR);
+    const RECT logo{10, 9, 48, 37};
+    if (RectVisible(dc, &logo)) drawIntelLogo(dc, 10, 9);
+    auto text = [&](const std::wstring& value, RECT cell, COLORREF color) {
+        if (!RectVisible(dc, &cell)) return;
+        SetTextColor(dc, color);
+        DrawTextW(dc, value.c_str(), -1, &cell,
+            DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS | DT_NOPREFIX);
+    };
     SelectObject(dc, g_metricsFont);
-    const auto& parts = g_compactParts;
-    std::array<SIZE, 4> sizes{};
-    int totalWidth = 0;
-    int activeSegments = 0;
-
-    for (size_t i = 0; i < parts.size(); ++i) {
-        if (parts[i].empty()) continue;
-        GetTextExtentPoint32W(dc, parts[i].c_str(), static_cast<int>(parts[i].size()), &sizes[i]);
-        totalWidth += sizes[i].cx;
-        activeSegments++;
+    for (size_t i = 0; i < COMPACT_CELLS.size(); ++i) {
+        text(COMPACT_LABELS[i], COMPACT_CELLS[i].label, i == 0 ? cpuLabelColor(g_cpuLoad, now) : TEXT_COLOR);
+        text(g_compactParts[i], COMPACT_CELLS[i].value, TEXT_COLOR);
     }
-
-    const int left = 58;
-    const int right = rc.right - 12;
-    int extra = std::max(0, right - left - totalWidth);
-    int gapCount = std::max(1, activeSegments - 1);
-    int gap = extra / gapCount;
-    int remainder = extra % gapCount;
-    int x = left;
-    int drawn = 0;
-
-    for (size_t i = 0; i < parts.size(); ++i) {
-        if (parts[i].empty()) continue;
-
-        int y = (46 - sizes[i].cy) / 2;
-        if (i == 0) {
-            // Like AI Island's GPU name: color only the label, never the value.
-            SIZE labelSize{};
-            const int labelLength = static_cast<int>(g_cpuIdentity.compact.size());
-                        GetTextExtentPoint32W(dc, g_cpuIdentity.compact.c_str(), labelLength, &labelSize);
-            SetTextColor(dc, cpuLabelColor(g_cpuLoad, now));
-            TextOutW(dc, x, y, g_cpuIdentity.compact.c_str(), labelLength);
-            SetTextColor(dc, TEXT_COLOR);
-            TextOutW(dc, x + labelSize.cx, y, parts[i].c_str() + labelLength, static_cast<int>(parts[i].size()) - labelLength);
-        } else {
-            TextOutW(dc, x, y, parts[i].c_str(), static_cast<int>(parts[i].size()));
-        }
-        drawn++;
-        if (drawn < activeSegments)
-            x += sizes[i].cx + gap + (drawn <= remainder ? 1 : 0);
-    }
-
     if (g_expanded) {
         SelectObject(dc, g_smallFont);
-        SetTextColor(dc, TEXT_COLOR);
-        constexpr UINT FLAGS = DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS;
-        for (int row = 0; row < 3; ++row) {
-            for (int col = 0; col < 2; ++col) {
-                RECT cell{col == 0 ? 14 : rc.right / 2 + 6, 46 + row * 25,
-                          col == 0 ? rc.right / 2 - 4 : rc.right - 12, 71 + row * 25};
-                DrawTextW(dc, g_expandedParts[row * 2 + col].c_str(), -1, &cell, FLAGS);
-            }
+        for (size_t i = 0; i < EXPANDED_CELLS.size(); ++i) {
+            text(EXPANDED_LABELS[i], EXPANDED_CELLS[i].label, TEXT_COLOR);
+            text(g_expandedParts[i], EXPANDED_CELLS[i].value, TEXT_COLOR);
         }
     }
+    RestoreDC(dc, saved);
 }
 
 void paint() {
+    // Capture the actual (possibly disjoint) update region before BeginPaint
+    // validates it. rcPaint alone would turn border damage into a full redraw.
+    HRGN damage = CreateRectRgn(0, 0, 0, 0);
+    const int regionType = damage ? GetUpdateRgn(g_hwnd, damage, FALSE) : ERROR;
     PAINTSTRUCT ps{};
     HDC dc = BeginPaint(g_hwnd, &ps);
     RECT rc{}; GetClientRect(g_hwnd, &rc);
-    render(dc, rc);
+    if (regionType != NULLREGION && !IsRectEmpty(&ps.rcPaint)) {
+        HRGN clip = regionType == ERROR ? nullptr : damage;
+        if (g_backBuffer.ensure(dc, rc.right, rc.bottom)) {
+            render(g_backBuffer.dc, rc, g_backBuffer.valid ? clip : nullptr);
+            g_backBuffer.valid = true;
+            BitBlt(dc, ps.rcPaint.left, ps.rcPaint.top,
+                ps.rcPaint.right - ps.rcPaint.left, ps.rcPaint.bottom - ps.rcPaint.top,
+                g_backBuffer.dc, ps.rcPaint.left, ps.rcPaint.top, SRCCOPY);
+        } else render(dc, rc, clip); // Keep the UI usable if GDI allocation fails.
+    }
     EndPaint(g_hwnd, &ps);
+    if (damage) DeleteObject(damage);
 }
 
 LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     switch (msg) {
     case WM_SHOWWINDOW:
-        g_sampling.store(wp != 0 && !g_suspended);
-        if (g_policyEvent) SetEvent(g_policyEvent);
+        publishSamplingPolicy(wp != 0);
         if (!wp) stopAnimation(hwnd);
         break;
     case WM_POWERBROADCAST:
         if (wp == PBT_APMSUSPEND) {
             g_suspended = true;
-            g_sampling.store(false);
-            if (g_policyEvent) SetEvent(g_policyEvent);
+            publishSamplingPolicy(false);
             stopAnimation(hwnd);
         } else if (wp == PBT_APMPOWERSTATUSCHANGE || wp == PBT_APMRESUMEAUTOMATIC || wp == PBT_APMRESUMESUSPEND) {
             g_suspended = false;
@@ -479,7 +621,6 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     case WM_STATS_READY:
         if (IsWindowVisible(hwnd)) {
             refreshDisplayCache();
-            InvalidateRect(hwnd, nullptr, FALSE);
         }
         return 0;
     case WM_SHOW_EXISTING_ISLAND:
@@ -490,8 +631,8 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     case WM_CREATE:
         // The worker delivers display updates; no independent polling timer.
         // A logon task can begin before the desktop or telemetry provider is
-        // fully ready. Re-arm the worker occasionally so it self-recovers
-        // instead of remaining asleep after an early visibility race.
+        // fully ready. Reconcile actual visibility to recover a missed initial
+        // show notification, without waking a worker whose policy is unchanged.
         SetTimer(hwnd, TELEMETRY_HEALTH_TIMER_ID, 15000, nullptr);
         g_hotkeyChoice = loadHotkeyChoice();
         g_autoHideOnHover = loadAutoHideOnHover();
@@ -504,7 +645,6 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         if(wp==STATS_TIMER_ID) {
 
             refreshDisplayCache();
-            InvalidateRect(hwnd,nullptr,FALSE);
         } else if(wp==ANIMATION_TIMER_ID) {
               // A layered, non-activating HWND can miss a leave notification
               // after being shown under a stationary cursor. Reconcile on the
@@ -516,7 +656,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                       SetTimer(hwnd,HOVER_TIMER_ID,1000,nullptr);
                   }
               }
-              if (!g_onBattery) InvalidateRect(hwnd,nullptr,FALSE);
+              if (!g_onBattery) invalidateAnimation(hwnd);
         } else if (wp == TELEMETRY_HEALTH_TIMER_ID) {
               updateSamplingPolicy(hwnd);
         } else if(wp==HOVER_TIMER_ID) {
@@ -631,6 +771,12 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         if (LOWORD(wp) == 5) { showAbout(); return 0; }
         break;
 
+    case WM_ERASEBKGND: return 1;
+    case WM_SIZE:
+    case WM_DISPLAYCHANGE:
+        g_backBuffer.release();
+        InvalidateRect(hwnd, nullptr, FALSE);
+        return 0;
     case WM_PAINT: paint(); return 0;
 
     case WM_QUERYENDSESSION: return TRUE;
@@ -646,9 +792,57 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         KillTimer(hwnd, ANIMATION_TIMER_ID);
         KillTimer(hwnd, TELEMETRY_HEALTH_TIMER_ID);
         if (g_hotkeyRegistered) UnregisterHotKey(hwnd, HOTKEY_ID);
+        g_backBuffer.release();
+        releaseLogoDc();
         PostQuitMessage(0); return 0;
     }
     return DefWindowProcW(hwnd, msg, wp, lp);
+}
+
+template<class Source>
+void runTelemetryWorker() {
+    std::unique_ptr<Source> telemetry;
+    HANDLE events[] = {g_stopEvent, g_policyEvent};
+    WorkerSchedule schedule;
+    DWORD delay = 0;
+    for (;;) {
+        DWORD wake = WaitForMultipleObjects(2, events, FALSE, delay);
+        if (wake == WAIT_OBJECT_0 || wake == WAIT_FAILED) break;
+        const auto policy = samplingPolicy();
+        auto now = GetTickCount64();
+        if (schedule.mustRelease(policy, now)) telemetry.reset();
+        schedule.releaseEpoch = policy.releaseEpoch;
+        if (policy.mode != SamplingMode::Active) {
+            schedule.retained = telemetry != nullptr;
+            delay = telemetry ? schedule.delayUntil(policy.hoverDeadline, now) : INFINITE;
+            continue;
+        }
+        if (!telemetry || schedule.resumeEpoch != policy.resumeEpoch) {
+            if (!telemetry) telemetry = std::make_unique<Source>();
+            else telemetry->reprime();
+            schedule.nextSample = GetTickCount64() + policy.interval;
+            schedule.resumeEpoch = policy.resumeEpoch;
+        }
+        schedule.retained = false;
+        now = GetTickCount64();
+        if (now >= schedule.nextSample) {
+            // Do not start a sample after a hide/suspend published
+            // while initialization was in progress.
+            const auto latest = samplingPolicy();
+            if (latest.mode != SamplingMode::Active || latest.resumeEpoch != policy.resumeEpoch) {
+                delay = 0;
+                continue;
+            }
+            Stats snapshot = telemetry->sample();
+            if (g_sampling.load()) {
+                std::lock_guard<std::mutex> guard(g_statsMutex);
+                g_snapshot = std::move(snapshot);
+                PostMessageW(g_hwnd, WM_STATS_READY, 0, 0);
+            }
+            schedule.nextSample = GetTickCount64() + policy.interval;
+        }
+        delay = schedule.delayUntil(schedule.nextSample, GetTickCount64());
+    }
 }
 
 int WINAPI wWinMain(HINSTANCE h, HINSTANCE, LPWSTR, int) {
@@ -712,33 +906,7 @@ int WINAPI wWinMain(HINSTANCE h, HINSTANCE, LPWSTR, int) {
         g_worker = std::thread([] {
             SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_BELOW_NORMAL);
             try {
-                std::unique_ptr<Telemetry> telemetry;
-                HANDLE events[] = {g_stopEvent, g_policyEvent};
-                DWORD delay = 0;
-                for (;;) {
-                    DWORD wake = WaitForMultipleObjects(2, events, FALSE, delay);
-                    if (wake == WAIT_OBJECT_0 || wake == WAIT_FAILED) break;
-                    if (!g_sampling.load()) {
-                        // Release the PDH query and PawnIO device/module while inactive.
-                        telemetry.reset();
-                        delay = INFINITE;
-                        continue;
-                    }
-                    if (!telemetry) {
-                        telemetry = std::make_unique<Telemetry>();
-                        delay = g_sampleInterval.load(); // Prime rate counters first.
-                        continue;
-                    }
-                    if (wake == WAIT_TIMEOUT) {
-                        Stats snapshot = telemetry->sample();
-                        {
-                            std::lock_guard<std::mutex> guard(g_statsMutex);
-                            g_snapshot = std::move(snapshot);
-                        }
-                        PostMessageW(g_hwnd, WM_STATS_READY, 0, 0);
-                    }
-                    delay = g_sampleInterval.load();
-                }
+                runTelemetryWorker<Telemetry>();
             } catch (...) {
                 PostMessageW(g_hwnd, WM_CLOSE, 0, 0);
             }
@@ -763,6 +931,7 @@ int WINAPI wWinMain(HINSTANCE h, HINSTANCE, LPWSTR, int) {
     CloseHandle(g_stopEvent);
     CloseHandle(g_policyEvent);
     DeleteObject(g_metricsFont); DeleteObject(g_smallFont);
+    releaseLogoDc();
     if (g_intelLogo) DeleteObject(g_intelLogo);
     if (g_backgroundBrush) DeleteObject(g_backgroundBrush);
     if (g_singleInstanceMutex) CloseHandle(g_singleInstanceMutex);
