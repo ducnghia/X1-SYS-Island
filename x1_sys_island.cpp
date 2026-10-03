@@ -64,7 +64,7 @@ bool g_onBattery = false;
 bool g_suspended = false;
 constexpr UINT WM_STATS_READY = WM_APP + 1;
 std::thread g_worker;
-constexpr int ISLAND_WIDTH = 560;
+constexpr int ISLAND_WIDTH = 620;
 constexpr int COMPACT_HEIGHT = 46;
 constexpr int EXPANDED_HEIGHT = 128;
 double g_cpuLoad = -1;
@@ -88,7 +88,7 @@ void releaseLogoDc() {
 HBRUSH g_backgroundBrush;
 std::array<std::wstring, 4> g_compactParts;
 
-std::array<std::wstring, 7> g_expandedParts;
+std::array<std::wstring, 6> g_expandedParts;
 
 
 POINT g_dragStart;
@@ -124,7 +124,7 @@ enum class LoadLevel {
 
 LoadLevel g_loadLevel = LoadLevel::Normal;
 void invalidateDisplayChanges(const std::array<std::wstring, 4>& compact,
-    const std::array<std::wstring, 7>& expanded, double cpu, LoadLevel level);
+    const std::array<std::wstring, 6>& expanded, double cpu, LoadLevel level);
 
 struct HotkeyOption {
     UINT modifiers;
@@ -396,15 +396,14 @@ void refreshDisplayCache() {
         stats.gpu >= 0 ? formatText(L"%.0f%%", stats.gpu) : L"N/A"
     };
     g_expandedParts = {
-        g_compactParts[0],
+        g_cpuIdentity.expanded + (stats.cpu >= 0 ? formatText(L"  %.0f%%", stats.cpu) : L"  N/A"),
         stats.temperature >= 0 && stats.tjMax >= 0
-            ? formatText(L"%.0f\u00B0C/%d\u00B0C", stats.temperature, stats.tjMax)
-            : L"N/A",
-        stats.total ? formatText(L"%.1f/%.1f GiB (%u%%)", stats.used/GIB, stats.total/GIB, ramPercent) : L"N/A",
-        g_compactParts[3],
-        fanModeName(stats.fans),
-        stats.fans.ok ? formatText(L"%lu RPM", stats.fans.fan1) : L"N/A",
-        stats.fans.ok ? formatText(L"%lu RPM", stats.fans.fan2) : L"N/A"
+            ? formatText(L"CPU Package/TjMax  %.0f\u00B0C/%d\u00B0C", stats.temperature, stats.tjMax)
+            : L"CPU Package/TjMax  N/A",
+        stats.total ? formatText(L"RAM  %.1f/%.1f GiB (%u%%)", stats.used/GIB, stats.total/GIB, ramPercent) : L"RAM  N/A",
+        stats.gpu >= 0 ? formatText(L"iGPU Load  %.0f%%", stats.gpu) : L"iGPU Load  N/A",
+        formatText(L"Fan Mode  %s", fanModeName(stats.fans)),
+        stats.fans.ok ? formatText(L"Fan 1 %lu RPM | Fan 2 %lu RPM", stats.fans.fan1, stats.fans.fan2) : L"Fan 1 N/A | Fan 2 N/A"
     };
     invalidateDisplayChanges(oldCompact, oldExpanded, oldCpu, oldLevel);
 }
@@ -440,22 +439,19 @@ struct TextCell { RECT label, value; };
 // with ellipsis within their own cell rather than shifting their neighbours.
 const std::array<TextCell, 4> COMPACT_CELLS{{
     {{58, 9, 112, 37}, {114, 9, 155, 37}},
-    {{159, 9, 190, 37}, {192, 9, 286, 37}},
-    {{294, 9, 336, 37}, {338, 9, 444, 37}},
-    {{452, 9, 486, 37}, {488, 9, 548, 37}}
+    {{159, 9, 202, 37}, {204, 9, 310, 37}},
+    {{318, 9, 376, 37}, {378, 9, 484, 37}},
+    {{492, 9, 538, 37}, {540, 9, 608, 37}}
 }};
-const std::array<TextCell, 7> EXPANDED_CELLS{{
-    {{14, 46, 222, 71}, {224, 46, 276, 71}},
-    {{286, 46, 421, 71}, {423, 46, 548, 71}},
-    {{14, 71, 48, 96}, {50, 71, 276, 96}},
-    {{286, 71, 358, 96}, {360, 71, 548, 96}},
-    {{14, 96, 82, 121}, {84, 96, 276, 121}},
-    {{286, 96, 324, 121}, {326, 96, 414, 121}},
-    {{420, 96, 458, 121}, {460, 96, 548, 121}}
+const std::array<RECT, 6> EXPANDED_CELLS{{
+    {14, 46, 306, 71},   // CPU Load
+    {316, 46, 608, 71},  // CPU Package/TjMax
+    {14, 71, 306, 96},   // RAM
+    {316, 71, 608, 96},  // iGPU Load
+    {14, 96, 306, 121},  // Fan Mode
+    {316, 96, 608, 121}  // Fan 1 & Fan 2
 }};
 const std::array<std::wstring, 4> COMPACT_LABELS{g_cpuIdentity.compact, L"RAM", L"C-Pkg", L"iGPU"};
-const std::array<std::wstring, 7> EXPANDED_LABELS{g_cpuIdentity.expanded,
-    L"CPU Package/TjMax", L"RAM", L"iGPU Load", L"Fan Mode", L"Fan 1", L"Fan 2"};
 
 std::array<RECT, 4> borderRects(const RECT& rc) {
     // Edge strips cover the rounded corners without touching the text/logo.
@@ -471,12 +467,12 @@ void invalidateAnimation(HWND hwnd) {
     if (g_cpuLoad >= 49.5) InvalidateRect(hwnd, &COMPACT_CELLS[0].label, FALSE);
 }
 void invalidateDisplayChanges(const std::array<std::wstring, 4>& compact,
-    const std::array<std::wstring, 7>& expanded, double cpu, LoadLevel level) {
+    const std::array<std::wstring, 6>& expanded, double cpu, LoadLevel level) {
     if (!g_hwnd) return;
     for (size_t i = 0; i < compact.size(); ++i)
         if (compact[i] != g_compactParts[i]) InvalidateRect(g_hwnd, &COMPACT_CELLS[i].value, FALSE);
     if (g_expanded) for (size_t i = 0; i < expanded.size(); ++i)
-        if (expanded[i] != g_expandedParts[i]) InvalidateRect(g_hwnd, &EXPANDED_CELLS[i].value, FALSE);
+        if (expanded[i] != g_expandedParts[i]) InvalidateRect(g_hwnd, &EXPANDED_CELLS[i], FALSE);
     const auto now = g_onBattery ? 0 : GetTickCount64();
     if (cpuLabelColor(cpu, now) != cpuLabelColor(g_cpuLoad, now))
         InvalidateRect(g_hwnd, &COMPACT_CELLS[0].label, FALSE);
@@ -570,9 +566,12 @@ void render(HDC dc, const RECT& rc, HRGN damage = nullptr) {
     }
     if (g_expanded) {
         SelectObject(dc, g_smallFont);
+        SetTextColor(dc, TEXT_COLOR);
+        constexpr UINT FLAGS = DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS | DT_NOPREFIX;
         for (size_t i = 0; i < EXPANDED_CELLS.size(); ++i) {
-            text(EXPANDED_LABELS[i], EXPANDED_CELLS[i].label, TEXT_COLOR);
-            text(g_expandedParts[i], EXPANDED_CELLS[i].value, TEXT_COLOR);
+            if (!RectVisible(dc, &EXPANDED_CELLS[i])) continue;
+            DrawTextW(dc, g_expandedParts[i].c_str(), -1,
+                const_cast<RECT*>(&EXPANDED_CELLS[i]), FLAGS);
         }
     }
     RestoreDC(dc, saved);

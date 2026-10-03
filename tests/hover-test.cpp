@@ -242,7 +242,9 @@ void testRendering() {
         g_expanded = !g_expanded;
         setWindowSize();
         UpdateWindow(g_hwnd);
-        assert(g_backBuffer.valid);
+        RECT client{}; GetClientRect(g_hwnd, &client);
+        assert(client.right == 620 && client.bottom == (g_expanded ? 128 : 46));
+        assert(g_backBuffer.valid && g_backBuffer.width == ISLAND_WIDTH);
         assert(g_backBuffer.height == (g_expanded ? EXPANDED_HEIGHT : COMPACT_HEIGHT));
         GdiFlush();
         assert(GetGuiResources(GetCurrentProcess(), GR_GDIOBJECTS) == resizeHandles);
@@ -259,7 +261,7 @@ void testRendering() {
     g_snapshot.fans.fan2 = 900;
     refreshDisplayCache();
     damage = CreateRectRgn(0,0,0,0);
-    expected = CreateRectRgnIndirect(&EXPANDED_CELLS[6].value);
+    expected = CreateRectRgnIndirect(&EXPANDED_CELLS[5]);
     GetUpdateRgn(g_hwnd, damage, FALSE);
     assert(EqualRgn(damage, expected));
     DeleteObject(damage); DeleteObject(expected);
@@ -280,7 +282,7 @@ void testRendering() {
             assert(GetPixel(reference.dc,x,y) == GetPixel(g_backBuffer.dc,x,y));
     textCalls = logoCalls = 0;
     InvalidateRect(g_hwnd, nullptr, TRUE); UpdateWindow(g_hwnd);
-    assert(textCalls == 22 && logoCalls == 1); // Complete exposure restores all cells.
+    assert(textCalls == 14 && logoCalls == 1); // 8 compact (4x2) + 6 expanded = 14 text calls.
     ReleaseDC(g_hwnd,target);
     reference.release();
     g_expanded = false; setWindowSize(); UpdateWindow(g_hwnd);
@@ -291,8 +293,11 @@ void testRendering() {
     puts("PASS: exact damage, animation-only draws, pixel-equivalent repair, exposure, resize and stable backbuffer handles.");
 }
 int main() {
-    g_metricsFont = CreateFontW(-14,0,0,0,600,FALSE,FALSE,FALSE,DEFAULT_CHARSET,0,0,0,0,L"Segoe UI");
-    g_smallFont = CreateFontW(-14,0,0,0,400,FALSE,FALSE,FALSE,DEFAULT_CHARSET,0,0,0,0,L"Segoe UI");
+    g_metricsFont = CreateFontW(-14,0,0,0,FW_SEMIBOLD,FALSE,FALSE,FALSE,DEFAULT_CHARSET,
+        OUT_DEFAULT_PRECIS,CLIP_DEFAULT_PRECIS,CLEARTYPE_QUALITY,DEFAULT_PITCH,L"Segoe UI");
+    g_smallFont = CreateFontW(-14,0,0,0,FW_NORMAL,FALSE,FALSE,FALSE,DEFAULT_CHARSET,
+        OUT_DEFAULT_PRECIS,CLIP_DEFAULT_PRECIS,CLEARTYPE_QUALITY,DEFAULT_PITCH,L"Segoe UI");
+    assert(g_metricsFont && g_smallFont);
     g_intelLogo=LoadBitmapW(GetModuleHandleW(nullptr),MAKEINTRESOURCEW(IDB_INTEL_LOGO));
     g_backgroundBrush = CreateSolidBrush(RGB(18,18,20));
     WNDCLASSW cls{}; cls.lpfnWndProc=TestProc; cls.hInstance=GetModuleHandleW(nullptr); cls.lpszClassName=L"X1SYSHoverTest";
@@ -311,21 +316,52 @@ int main() {
         for (size_t i = 0; i < cells.size(); ++i) {
             const auto& cell = cells[i];
             assert(cell.label.right <= cell.value.left && cell.value.right <= ISLAND_WIDTH-12);
-            SIZE size{}; GetTextExtentPoint32W(dc, values[i].c_str(), static_cast<int>(values[i].size()), &size);
+            SIZE size{};
+            assert(GetTextExtentPoint32W(dc, values[i].c_str(), static_cast<int>(values[i].size()), &size));
             if (size.cx > cell.value.right-cell.value.left)
                 printf("Cell %zu needs %ld px, has %ld px\n", i, size.cx, cell.value.right-cell.value.left);
             assert(size.cx <= cell.value.right-cell.value.left);
         }
         SelectObject(dc, previous);
     };
+    auto checkExpandedCells = [&](const auto& cells, const auto& values, HFONT font) {
+        auto previous = SelectObject(dc, font);
+        for (size_t i = 0; i < cells.size(); ++i) {
+            const auto& cell = cells[i];
+            assert(cell.right <= ISLAND_WIDTH-12);
+            SIZE size{};
+            assert(GetTextExtentPoint32W(dc, values[i].c_str(), static_cast<int>(values[i].size()), &size));
+            assert(size.cx <= cell.right-cell.left);
+        }
+        SelectObject(dc, previous);
+    };
     checkCells(COMPACT_CELLS, g_compactParts, g_metricsFont);
-    checkCells(EXPANDED_CELLS, g_expandedParts, g_smallFont);
+    checkExpandedCells(EXPANDED_CELLS, g_expandedParts, g_smallFont);
+    auto previous = SelectObject(dc, g_metricsFont);
+    // CPU identity may intentionally ellipsize; the other compact labels must not.
+    for (size_t i = 1; i < COMPACT_LABELS.size(); ++i) {
+        SIZE size{};
+        assert(GetTextExtentPoint32W(dc, COMPACT_LABELS[i].c_str(),
+            static_cast<int>(COMPACT_LABELS[i].size()), &size));
+        const auto& label = COMPACT_CELLS[i].label;
+        printf("Compact label %ls: %ld px / %ld px\n", COMPACT_LABELS[i].c_str(), size.cx, label.right-label.left);
+        assert(size.cx <= label.right-label.left && size.cy <= label.bottom-label.top);
+        assert(COMPACT_CELLS[i-1].value.right <= label.left);
+    }
+    SelectObject(dc, previous);
+    g_snapshot.temperature = 100; g_snapshot.tjMax = 100;
+    g_snapshot.used = g_snapshot.total = static_cast<ULONGLONG>(63.7 * 1073741824.0);
+    refreshDisplayCache();
+    const std::array<std::wstring, 4> typicalValues{L"100%", L"63.7/63.7G", L"100\u00B0C/100\u00B0C", L"100%"};
+    assert(g_compactParts == typicalValues);
+    checkCells(COMPACT_CELLS, g_compactParts, g_metricsFont);
+    checkExpandedCells(EXPANDED_CELLS, g_expandedParts, g_smallFont);
     ReleaseDC(g_hwnd,dc);
     assert(g_loadLevel==LoadLevel::Red);
     assert(levelForPercent(49)==LoadLevel::Normal);
     assert(levelForPercent(50)==LoadLevel::Yellow);
     assert(levelForPercent(80)==LoadLevel::Red);
-    puts("PASS: 560px layout, separate label/value and fan cells, and border thresholds.");
+    puts("PASS: 620px layout, full compact labels and typical values at Segoe UI 14px, separate cells, and border thresholds.");
     g_snapshot.cpu=17; g_snapshot.gpu=32; g_snapshot.temperature=54;
     g_snapshot.tjMax=100; g_snapshot.distanceToTjMax=46;
     g_snapshot.used=32ULL*1024*1024*1024;
@@ -358,7 +394,7 @@ int main() {
             assert(EqualRect(&compactCells[i].value, &COMPACT_CELLS[i].value));
         }
         for (size_t i = 0; i < expandedCells.size(); ++i)
-            assert(EqualRect(&expandedCells[i].value, &EXPANDED_CELLS[i].value));
+            assert(EqualRect(&expandedCells[i], &EXPANDED_CELLS[i]));
     }
     assert(extentCalls == measured);
     ReleaseDC(g_hwnd, cacheDc);

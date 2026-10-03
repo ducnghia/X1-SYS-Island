@@ -1,6 +1,6 @@
 # X1 SYS Island v0.8.1
 
-X1 SYS Island is a Windows x64 Win32/GDI overlay for Intel CPU load, system RAM, Intel iGPU load, CPU Package temperature, and read-only fan telemetry. It matches X1 AI Island's 560 px layout: 560x46 collapsed and 560x128 expanded.
+X1 SYS Island is a Windows x64 Win32/GDI overlay for Intel CPU load, system RAM, Intel iGPU load, CPU Package temperature, and read-only fan telemetry. Its layout is 620x46 px collapsed and 620x128 px expanded, with fixed label/value cells sized to show the full RAM, C-Pkg, and iGPU labels.
 
 ## Screenshots
 
