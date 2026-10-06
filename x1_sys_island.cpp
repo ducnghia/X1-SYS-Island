@@ -70,6 +70,8 @@ constexpr int EXPANDED_HEIGHT = 128;
 double g_cpuLoad = -1;
 const CpuIdentity g_cpuIdentity = detectCpuIdentity();
 constexpr COLORREF TEXT_COLOR = RGB(242, 242, 245);
+constexpr COLORREF EXPANDED_LABEL_COLOR = RGB(155, 160, 168);
+constexpr COLORREF EXPANDED_VALUE_COLOR = RGB(235, 238, 242);
 HWND g_hwnd;
 HANDLE g_singleInstanceMutex;
 
@@ -451,25 +453,27 @@ const std::array<RECT, 9> EXPANDED_CELLS{{
     {14, 96, 172, 121}, {182, 96, 340, 121}, {350, 96, 508, 121}
 }};
 const std::array<std::wstring, 9> EXPANDED_LABELS{
-    L"CPU", L"CPU Package", L"TjMax", L"iGPU", L"RAM", L"RAM Usage",
+    g_cpuIdentity.expanded, L"CPU Package", L"TjMax", L"iGPU", L"RAM", L"RAM Usage",
     L"Fan Mode", L"Fan 1 (rpm)", L"Fan 2 (rpm)"};
 std::array<TextCell, 9> g_expandedCells{};
 HFONT g_layoutFont = nullptr;
 void ensureExpandedLayout(HDC dc) {
     if (g_layoutFont == g_smallFont || !g_smallFont) return;
-    const auto previous = SelectObject(dc, g_smallFont);
-    // Measure once per font, not per sample. Reserve worst-case normal values.
-    const wchar_t* widest[] = {L"100%", L"125\u00B0C", L"125\u00B0C", L"100%",
-        L"64.0/64.0 GiB", L"100%", L"Performance", L"9999", L"9999"};
+    const auto previous = SelectObject(dc, g_metricsFont);
+    SIZE cpuValue{};
+    GetTextExtentPoint32W(dc, L"100%", 4, &cpuValue);
+    SelectObject(dc, g_smallFont);
+    // Measure labels once per font; values share each column's fixed right edge.
     for (size_t i = 0; i < g_expandedCells.size(); ++i) {
         const RECT row = EXPANDED_CELLS[i];
-        SIZE label{}, value{};
+        SIZE label{};
         GetTextExtentPoint32W(dc, EXPANDED_LABELS[i].c_str(),
             static_cast<int>(EXPANDED_LABELS[i].size()), &label);
-        GetTextExtentPoint32W(dc, widest[i], lstrlenW(widest[i]), &value);
-        const LONG end = row.left + label.cx;
+
+        const LONG end = i == 0 ? std::min(row.left + label.cx, row.right - cpuValue.cx - 8)
+            : row.left + label.cx;
         g_expandedCells[i] = {{row.left, row.top, end, row.bottom},
-            {end + 8, row.top, end + 8 + value.cx, row.bottom}};
+            {end + 8, row.top, row.right, row.bottom}};
     }
     SelectObject(dc, previous);
     g_layoutFont = g_smallFont;
@@ -598,10 +602,11 @@ void render(HDC dc, const RECT& rc, HRGN damage = nullptr) {
     if (g_expanded) {
         SelectObject(dc, g_smallFont);
         ensureExpandedLayout(dc);
-        for (size_t i = 0; i < g_expandedCells.size(); ++i) {
-            text(EXPANDED_LABELS[i], g_expandedCells[i].label, TEXT_COLOR);
-            text(g_expandedParts[i], g_expandedCells[i].value, TEXT_COLOR, DT_RIGHT);
-        }
+        for (size_t i = 0; i < g_expandedCells.size(); ++i)
+            text(EXPANDED_LABELS[i], g_expandedCells[i].label, EXPANDED_LABEL_COLOR);
+        SelectObject(dc, g_metricsFont);
+        for (size_t i = 0; i < g_expandedCells.size(); ++i)
+            text(g_expandedParts[i], g_expandedCells[i].value, EXPANDED_VALUE_COLOR, DT_RIGHT);
     }
     RestoreDC(dc, saved);
 }
