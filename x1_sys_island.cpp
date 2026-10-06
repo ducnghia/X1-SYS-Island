@@ -64,7 +64,7 @@ bool g_onBattery = false;
 bool g_suspended = false;
 constexpr UINT WM_STATS_READY = WM_APP + 1;
 std::thread g_worker;
-constexpr int ISLAND_WIDTH = 620;
+constexpr int ISLAND_WIDTH = 520;
 constexpr int COMPACT_HEIGHT = 46;
 constexpr int EXPANDED_HEIGHT = 128;
 double g_cpuLoad = -1;
@@ -114,7 +114,7 @@ const UINT WM_SHOW_EXISTING_ISLAND = WM_USER + 1;
 const wchar_t SINGLE_INSTANCE_MUTEX[] = L"Global\\X1SYSIslandMutex";
 
 const BYTE ISLAND_OPACITY = 230;
-const wchar_t APP_VERSION[] = L"0.8.1";
+
 
 enum class LoadLevel {
     Normal,
@@ -123,6 +123,7 @@ enum class LoadLevel {
 };
 
 LoadLevel g_loadLevel = LoadLevel::Normal;
+void ensureExpandedLayout(HDC dc);
 void invalidateDisplayChanges(const std::array<std::wstring, 4>& compact,
     const std::array<std::wstring, 6>& expanded, double cpu, LoadLevel level);
 
@@ -285,7 +286,7 @@ INT_PTR CALLBACK AboutDialogProc(HWND dialog,UINT msg,WPARAM wp,LPARAM lp) {
         SetWindowLongPtrW(dialog,DWLP_USER,reinterpret_cast<LONG_PTR>(logo));
         SendDlgItemMessageW(dialog,IDC_ABOUT_LOGO,STM_SETIMAGE,IMAGE_BITMAP,
                             reinterpret_cast<LPARAM>(logo));
-        SetDlgItemTextW(dialog,IDC_ABOUT_VERSION,formatText(L"X1 SYS Island v%s",APP_VERSION).c_str());
+
         SendDlgItemMessageW(dialog,IDC_ABOUT_VERSION,WM_SETFONT,
                             reinterpret_cast<WPARAM>(g_metricsFont),TRUE);
 
@@ -396,14 +397,14 @@ void refreshDisplayCache() {
         stats.gpu >= 0 ? formatText(L"%.0f%%", stats.gpu) : L"N/A"
     };
     g_expandedParts = {
-        g_cpuIdentity.expanded + (stats.cpu >= 0 ? formatText(L"  %.0f%%", stats.cpu) : L"  N/A"),
+        stats.cpu >= 0 ? formatText(L"%.0f%%", stats.cpu) : L"N/A",
         stats.temperature >= 0 && stats.tjMax >= 0
-            ? formatText(L"CPU Package/TjMax  %.0f\u00B0C/%d\u00B0C", stats.temperature, stats.tjMax)
-            : L"CPU Package/TjMax  N/A",
-        stats.total ? formatText(L"RAM  %.1f/%.1f GiB (%u%%)", stats.used/GIB, stats.total/GIB, ramPercent) : L"RAM  N/A",
-        stats.gpu >= 0 ? formatText(L"iGPU Load  %.0f%%", stats.gpu) : L"iGPU Load  N/A",
-        formatText(L"Fan Mode  %s", fanModeName(stats.fans)),
-        stats.fans.ok ? formatText(L"Fan 1 %lu RPM | Fan 2 %lu RPM", stats.fans.fan1, stats.fans.fan2) : L"Fan 1 N/A | Fan 2 N/A"
+            ? formatText(L"%.0f\u00B0C/%d\u00B0C", stats.temperature, stats.tjMax)
+            : L"N/A",
+        stats.gpu >= 0 ? formatText(L"%.0f%%", stats.gpu) : L"N/A",
+        stats.total ? formatText(L"%.1f/%.1f GiB (%u%%)", stats.used/GIB, stats.total/GIB, ramPercent) : L"N/A",
+        fanModeName(stats.fans),
+        stats.fans.ok ? formatText(L"%lu/%lu", stats.fans.fan1, stats.fans.fan2) : L"N/A"
     };
     invalidateDisplayChanges(oldCompact, oldExpanded, oldCpu, oldLevel);
 }
@@ -438,20 +439,50 @@ struct TextCell { RECT label, value; };
 // Geometry never depends on live digits. Long identities/values are clipped
 // with ellipsis within their own cell rather than shifting their neighbours.
 const std::array<TextCell, 4> COMPACT_CELLS{{
-    {{58, 9, 112, 37}, {114, 9, 155, 37}},
-    {{159, 9, 202, 37}, {204, 9, 310, 37}},
-    {{318, 9, 376, 37}, {378, 9, 484, 37}},
-    {{492, 9, 538, 37}, {540, 9, 608, 37}}
+    {{58, 9, 116, 37}, {118, 9, 162, 37}},
+    {{0, 0, 0, 0},     {178, 9, 268, 37}},
+    {{0, 0, 0, 0},     {284, 9, 388, 37}},
+    {{404, 9, 448, 37}, {450, 9, 506, 37}}
 }};
 const std::array<RECT, 6> EXPANDED_CELLS{{
-    {14, 46, 306, 71},   // CPU Load
-    {316, 46, 608, 71},  // CPU Package/TjMax
-    {14, 71, 306, 96},   // RAM
-    {316, 71, 608, 96},  // iGPU Load
-    {14, 96, 306, 121},  // Fan Mode
-    {316, 96, 608, 121}  // Fan 1 & Fan 2
+    {14, 46, 256, 71},   // CPU Load
+    {266, 46, 508, 71},  // CPU Package/TjMax
+    {14, 71, 256, 96},   // iGPU
+    {266, 71, 508, 96},  // RAM
+    {14, 96, 256, 121},  // Fan Mode
+    {266, 96, 508, 121}  // Fan 1 & Fan 2
 }};
-const std::array<std::wstring, 4> COMPACT_LABELS{g_cpuIdentity.compact, L"RAM", L"C-Pkg", L"iGPU"};
+const std::array<std::wstring, 6> EXPANDED_LABELS{
+    g_cpuIdentity.expanded, L"CPU Package/TjMax", L"iGPU", L"RAM", L"Fan Mode", L"Fan 1/Fan 2"};
+std::array<TextCell, 6> g_expandedCells{};
+RECT g_fanUnit{};
+HFONT g_layoutFont = nullptr;
+void ensureExpandedLayout(HDC dc) {
+    if (g_layoutFont == g_smallFont || !g_smallFont) return;
+    const auto previous = SelectObject(dc, g_smallFont);
+    // Measure once per font, not per sample. Reserve worst-case normal values.
+    const wchar_t* widest[] = {L"100%", L"125\u00B0C/125\u00B0C", L"100%",
+        L"64.0/64.0 GiB (100%)", L"Performance", L"8191/8191"};
+    SIZE unit{};
+    GetTextExtentPoint32W(dc, L"rpm", 3, &unit);
+    for (size_t i = 0; i < g_expandedCells.size(); ++i) {
+        RECT row = EXPANDED_CELLS[i];
+        if (i == 5) {
+            g_fanUnit = {row.right - unit.cx, row.top, row.right, row.bottom};
+            row.right = g_fanUnit.left - 4;
+        }
+        SIZE label{}, value{};
+        GetTextExtentPoint32W(dc, EXPANDED_LABELS[i].c_str(),
+            static_cast<int>(EXPANDED_LABELS[i].size()), &label);
+        GetTextExtentPoint32W(dc, widest[i], lstrlenW(widest[i]), &value);
+        const LONG end = std::min(row.left + label.cx, row.right - value.cx - 8);
+        g_expandedCells[i] = {{row.left, row.top, end, row.bottom},
+            {end + 8, row.top, row.right, row.bottom}};
+    }
+    SelectObject(dc, previous);
+    g_layoutFont = g_smallFont;
+}
+const std::array<std::wstring, 4> COMPACT_LABELS{g_cpuIdentity.compact, L"", L"", L"iGPU"};
 
 std::array<RECT, 4> borderRects(const RECT& rc) {
     // Edge strips cover the rounded corners without touching the text/logo.
@@ -469,10 +500,14 @@ void invalidateAnimation(HWND hwnd) {
 void invalidateDisplayChanges(const std::array<std::wstring, 4>& compact,
     const std::array<std::wstring, 6>& expanded, double cpu, LoadLevel level) {
     if (!g_hwnd) return;
+    if (g_layoutFont != g_smallFont) {
+        HDC dc = GetDC(g_hwnd);
+        if (dc) { ensureExpandedLayout(dc); ReleaseDC(g_hwnd, dc); }
+    }
     for (size_t i = 0; i < compact.size(); ++i)
         if (compact[i] != g_compactParts[i]) InvalidateRect(g_hwnd, &COMPACT_CELLS[i].value, FALSE);
     if (g_expanded) for (size_t i = 0; i < expanded.size(); ++i)
-        if (expanded[i] != g_expandedParts[i]) InvalidateRect(g_hwnd, &EXPANDED_CELLS[i], FALSE);
+        if (expanded[i] != g_expandedParts[i]) InvalidateRect(g_hwnd, &g_expandedCells[i].value, FALSE);
     const auto now = g_onBattery ? 0 : GetTickCount64();
     if (cpuLabelColor(cpu, now) != cpuLabelColor(g_cpuLoad, now))
         InvalidateRect(g_hwnd, &COMPACT_CELLS[0].label, FALSE);
@@ -509,6 +544,15 @@ struct BackBuffer {
     }
 };
 BackBuffer g_backBuffer;
+struct DamageRegion {
+    HRGN region = nullptr;
+    ~DamageRegion() { release(); }
+    void release() { if (region) DeleteObject(region); region = nullptr; }
+    HRGN ensure() {
+        if (!region) region = CreateRectRgn(0, 0, 0, 0);
+        return region;
+    }
+} g_damageRegion;
 
 void drawIntelLogo(HDC dc, int x, int y) {
     if (!g_intelLogo) return;
@@ -526,16 +570,11 @@ void drawIntelLogo(HDC dc, int x, int y) {
 void render(HDC dc, const RECT& rc, HRGN damage = nullptr) {
     const int saved = SaveDC(dc);
     if (!saved) return;
-    if (damage) {
-        ExtSelectClipRgn(dc, damage, RGN_AND);
-        const DWORD bytes = GetRegionData(damage, 0, nullptr);
-        std::vector<DWORD> storage((bytes + sizeof(DWORD) - 1) / sizeof(DWORD));
-        auto data = reinterpret_cast<RGNDATA*>(storage.data());
-        if (bytes && GetRegionData(damage, bytes, data)) {
-            const auto rects = reinterpret_cast<const RECT*>(data->Buffer);
-            for (DWORD i = 0; i < data->rdh.nCount; ++i) FillRect(dc, &rects[i], g_backgroundBrush);
-        }
-    } else FillRect(dc, &rc, g_backgroundBrush);
+    // FillRect honours the exact DC clip, including disjoint border strips.
+    // If selecting damage fails, repaint the whole buffer rather than retaining
+    // stale pixels. A paint DC still carries BeginPaint's own clipping.
+    if (damage) ExtSelectClipRgn(dc, damage, RGN_AND);
+    FillRect(dc, &rc, g_backgroundBrush);
 
     ULONGLONG now = g_onBattery ? 0 : GetTickCount64();
     bool borderVisible = false;
@@ -553,11 +592,11 @@ void render(HDC dc, const RECT& rc, HRGN damage = nullptr) {
     SetBkMode(dc, TRANSPARENT);
     const RECT logo{10, 9, 48, 37};
     if (RectVisible(dc, &logo)) drawIntelLogo(dc, 10, 9);
-    auto text = [&](const std::wstring& value, RECT cell, COLORREF color) {
-        if (!RectVisible(dc, &cell)) return;
+    auto text = [&](const std::wstring& value, RECT cell, COLORREF color, UINT alignment = DT_LEFT) {
+        if (value.empty() || !RectVisible(dc, &cell)) return;
         SetTextColor(dc, color);
         DrawTextW(dc, value.c_str(), -1, &cell,
-            DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS | DT_NOPREFIX);
+            alignment | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS | DT_NOPREFIX);
     };
     SelectObject(dc, g_metricsFont);
     for (size_t i = 0; i < COMPACT_CELLS.size(); ++i) {
@@ -566,13 +605,13 @@ void render(HDC dc, const RECT& rc, HRGN damage = nullptr) {
     }
     if (g_expanded) {
         SelectObject(dc, g_smallFont);
-        SetTextColor(dc, TEXT_COLOR);
-        constexpr UINT FLAGS = DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS | DT_NOPREFIX;
-        for (size_t i = 0; i < EXPANDED_CELLS.size(); ++i) {
-            if (!RectVisible(dc, &EXPANDED_CELLS[i])) continue;
-            DrawTextW(dc, g_expandedParts[i].c_str(), -1,
-                const_cast<RECT*>(&EXPANDED_CELLS[i]), FLAGS);
+        ensureExpandedLayout(dc);
+        for (size_t i = 0; i < g_expandedCells.size(); ++i) {
+            text(EXPANDED_LABELS[i], g_expandedCells[i].label, TEXT_COLOR);
+            text(g_expandedParts[i], g_expandedCells[i].value, TEXT_COLOR, DT_RIGHT);
         }
+        static const std::wstring unit = L"rpm";
+        text(unit, g_fanUnit, TEXT_COLOR);
     }
     RestoreDC(dc, saved);
 }
@@ -580,7 +619,7 @@ void render(HDC dc, const RECT& rc, HRGN damage = nullptr) {
 void paint() {
     // Capture the actual (possibly disjoint) update region before BeginPaint
     // validates it. rcPaint alone would turn border damage into a full redraw.
-    HRGN damage = CreateRectRgn(0, 0, 0, 0);
+    HRGN damage = g_damageRegion.ensure();
     const int regionType = damage ? GetUpdateRgn(g_hwnd, damage, FALSE) : ERROR;
     PAINTSTRUCT ps{};
     HDC dc = BeginPaint(g_hwnd, &ps);
@@ -596,7 +635,6 @@ void paint() {
         } else render(dc, rc, clip); // Keep the UI usable if GDI allocation fails.
     }
     EndPaint(g_hwnd, &ps);
-    if (damage) DeleteObject(damage);
 }
 
 LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
@@ -792,6 +830,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         KillTimer(hwnd, TELEMETRY_HEALTH_TIMER_ID);
         if (g_hotkeyRegistered) UnregisterHotKey(hwnd, HOTKEY_ID);
         g_backBuffer.release();
+        g_damageRegion.release();
         releaseLogoDc();
         PostQuitMessage(0); return 0;
     }

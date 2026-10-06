@@ -22,14 +22,39 @@ BOOL TestGetTextExtentPoint32W(HDC dc, LPCWSTR text, int count, LPSIZE size) {
 }
 #define GetTextExtentPoint32W TestGetTextExtentPoint32W
 int textCalls = 0, logoCalls = 0, fillCalls = 0;
+int expandedLabelCalls = 0;
+bool countExpandedLabels = false;
+RECT lastTextRect{};
+UINT lastTextFlags = 0;
+int regionCreates = 0;
+HRGN TestCreateRectRgn(int l, int t, int r, int b) {
+    ++regionCreates;
+    return CreateRectRgn(l, t, r, b);
+}
+#define CreateRectRgn TestCreateRectRgn
 LONG largestFill = 0;
 int TestDrawTextW(HDC dc, LPCWSTR text, int count, LPRECT rect, UINT flags) {
     ++textCalls;
+    lastTextRect = *rect;
+    lastTextFlags = flags;
+    if (countExpandedLabels && (wcscmp(text, L"RAM") == 0 || wcscmp(text, L"iGPU") == 0 ||
+        wcscmp(text, L"CPU Package/TjMax") == 0 || wcscmp(text, L"Fan Mode") == 0 ||
+        wcscmp(text, L"Fan 1/Fan 2") == 0 || wcscmp(text, L"rpm") == 0))
+        ++expandedLabelCalls;
     return DrawTextW(dc, text, count, rect, flags);
 }
 int TestFillRect(HDC dc, const RECT* rect, HBRUSH brush) {
     ++fillCalls;
-    largestFill = (std::max)(largestFill, (rect->right-rect->left)*(rect->bottom-rect->top));
+    // Count actual writable pixels, not the bounding box of a disjoint clip.
+    // RectVisible on unit rectangles queries the real DC clip without allocating
+    // a test region that could hide production region churn.
+    LONG area = 0;
+    for (LONG y = rect->top; y < rect->bottom; ++y)
+        for (LONG x = rect->left; x < rect->right; ++x) {
+            RECT pixel{x, y, x+1, y+1};
+            if (RectVisible(dc, &pixel)) ++area;
+        }
+    largestFill = (std::max)(largestFill, area);
     return FillRect(dc, rect, brush);
 }
 BOOL TestBitBlt(HDC dc, int x, int y, int w, int h, HDC source, int sx, int sy, DWORD op) {
@@ -46,6 +71,7 @@ BOOL TestBitBlt(HDC dc, int x, int y, int w, int h, HDC source, int sx, int sy, 
 #undef DrawTextW
 #undef FillRect
 #undef BitBlt
+#undef CreateRectRgn
 
 LRESULT CALLBACK TestProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     if (msg == WM_CREATE) return 0; // No real hotkey registration/telemetry worker.
@@ -192,6 +218,10 @@ void testRendering() {
     GdiFlush();
     const DWORD handles = GetGuiResources(GetCurrentProcess(), GR_GDIOBJECTS);
     HRGN damage = CreateRectRgn(0,0,0,0);
+    const HRGN retainedDamage = g_damageRegion.region;
+    const int createdRegions = regionCreates;
+    const int measuredExtents = extentCalls;
+    assert(retainedDamage);
     for (int i = 0; i < 100; ++i) {
         textCalls = logoCalls = fillCalls = 0; largestFill = 0;
         SendMessageW(g_hwnd, WM_TIMER, ANIMATION_TIMER_ID, 0);
@@ -202,7 +232,13 @@ void testRendering() {
         assert(!PtInRegion(damage, 20, 20));
         UpdateWindow(g_hwnd);
         assert(textCalls == 1 && logoCalls == 0 && fillCalls > 0);
+        LONG expectedArea = 0;
+        for (int y = 0; y < COMPACT_HEIGHT; ++y)
+            for (int x = 0; x < ISLAND_WIDTH; ++x)
+                if (PtInRegion(damage, x, y)) ++expectedArea;
+        assert(largestFill == expectedArea);
         assert(largestFill < ISLAND_WIDTH*COMPACT_HEIGHT);
+        assert(g_damageRegion.region == retainedDamage && regionCreates == createdRegions);
         assert(g_backBuffer.dc == dc && g_backBuffer.bitmap == bitmap);
         assert(GetGuiResources(GetCurrentProcess(), GR_GDIOBJECTS) == handles + 1);
     }
@@ -243,7 +279,9 @@ void testRendering() {
         setWindowSize();
         UpdateWindow(g_hwnd);
         RECT client{}; GetClientRect(g_hwnd, &client);
-        assert(client.right == 620 && client.bottom == (g_expanded ? 128 : 46));
+        assert(client.right == 520 && client.bottom == (g_expanded ? 128 : 46));
+        assert(g_damageRegion.region == retainedDamage && regionCreates == createdRegions);
+        assert(extentCalls == measuredExtents);
         assert(g_backBuffer.valid && g_backBuffer.width == ISLAND_WIDTH);
         assert(g_backBuffer.height == (g_expanded ? EXPANDED_HEIGHT : COMPACT_HEIGHT));
         GdiFlush();
@@ -261,13 +299,52 @@ void testRendering() {
     g_snapshot.fans.fan2 = 900;
     refreshDisplayCache();
     damage = CreateRectRgn(0,0,0,0);
-    expected = CreateRectRgnIndirect(&EXPANDED_CELLS[5]);
+    expected = CreateRectRgnIndirect(&g_expandedCells[5].value);
     GetUpdateRgn(g_hwnd, damage, FALSE);
     assert(EqualRgn(damage, expected));
     DeleteObject(damage); DeleteObject(expected);
-    textCalls = 0;
+    textCalls = expandedLabelCalls = 0;
+    countExpandedLabels = true;
     UpdateWindow(g_hwnd);
-    assert(textCalls == 1);
+    assert(textCalls == 1 && expandedLabelCalls == 0);
+    countExpandedLabels = false;
+    // Every expanded field repairs only its own value, even when its digits
+    // grow/shrink. Compare each incremental result to a complete fresh image.
+    HDC comparisonDc = GetDC(g_hwnd);
+    BackBuffer valueReference;
+    assert(valueReference.ensure(comparisonDc, ISLAND_WIDTH, EXPANDED_HEIGHT));
+    const RECT expandedRect{0, 0, ISLAND_WIDTH, EXPANDED_HEIGHT};
+    g_expandedParts.fill(L"baseline");
+    InvalidateRect(g_hwnd, nullptr, FALSE); UpdateWindow(g_hwnd);
+    damage = CreateRectRgn(0,0,0,0);
+    expected = CreateRectRgn(0,0,0,0);
+    for (size_t field = 0; field < g_expandedParts.size(); ++field) {
+        for (const wchar_t* value : {L"N/A", L"1", L"100"}) {
+            const auto oldParts = g_expandedParts;
+            g_expandedParts[field] = value;
+            invalidateDisplayChanges(g_compactParts, oldParts, g_cpuLoad, g_loadLevel);
+            SetRectRgn(expected, g_expandedCells[field].value.left, g_expandedCells[field].value.top,
+                g_expandedCells[field].value.right, g_expandedCells[field].value.bottom);
+            GetUpdateRgn(g_hwnd, damage, FALSE);
+            assert(EqualRgn(damage, expected));
+            textCalls = expandedLabelCalls = 0;
+            countExpandedLabels = true;
+            UpdateWindow(g_hwnd);
+            assert(textCalls == 1 && expandedLabelCalls == 0);
+            assert(EqualRect(&lastTextRect, &g_expandedCells[field].value));
+            assert(lastTextFlags & DT_RIGHT);
+            countExpandedLabels = false;
+            render(valueReference.dc, expandedRect);
+            for (int y = 0; y < EXPANDED_HEIGHT; ++y)
+                for (int x = 0; x < ISLAND_WIDTH; ++x)
+                    assert(GetPixel(valueReference.dc,x,y) == GetPixel(g_backBuffer.dc,x,y));
+        }
+    }
+    DeleteObject(damage); DeleteObject(expected);
+    valueReference.release();
+    ReleaseDC(g_hwnd, comparisonDc);
+    // Restore real formatted values before the remaining exposure checks.
+    refreshDisplayCache(); UpdateWindow(g_hwnd);
     // Force a border/CPU colour transition while keeping all numeric cells intact.
     g_loadLevel = LoadLevel::Red;
     g_cpuLoad = 90;
@@ -282,7 +359,9 @@ void testRendering() {
             assert(GetPixel(reference.dc,x,y) == GetPixel(g_backBuffer.dc,x,y));
     textCalls = logoCalls = 0;
     InvalidateRect(g_hwnd, nullptr, TRUE); UpdateWindow(g_hwnd);
-    assert(textCalls == 14 && logoCalls == 1); // 8 compact (4x2) + 6 expanded = 14 text calls.
+    assert(textCalls == 19 && logoCalls == 1); // 6 compact + 12 expanded + static rpm.
+    assert(g_damageRegion.region == retainedDamage && regionCreates == createdRegions);
+    assert(extentCalls == measuredExtents);
     ReleaseDC(g_hwnd,target);
     reference.release();
     g_expanded = false; setWindowSize(); UpdateWindow(g_hwnd);
@@ -291,6 +370,42 @@ void testRendering() {
     g_onBattery = false;
     SetWindowPos(g_hwnd, nullptr, -30000, -30000, 0, 0, SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
     puts("PASS: exact damage, animation-only draws, pixel-equivalent repair, exposure, resize and stable backbuffer handles.");
+}
+#pragma comment(lib, "version.lib")
+void testAboutVersion() {
+    wchar_t path[32768]{};
+    const DWORD length = GetModuleFileNameW(nullptr, path, ARRAYSIZE(path));
+    assert(length && length < ARRAYSIZE(path));
+    const DWORD bytes = GetFileVersionInfoSizeW(path, nullptr);
+    assert(bytes);
+    std::vector<BYTE> metadata(bytes);
+    assert(GetFileVersionInfoW(path, 0, bytes, metadata.data()));
+    VS_FIXEDFILEINFO* info = nullptr;
+    UINT size = 0;
+    assert(VerQueryValueW(metadata.data(), L"\\", reinterpret_cast<void**>(&info), &size));
+    assert(size >= sizeof(*info) && info->dwSignature == 0xfeef04bd);
+    const auto version = formatText(L"%u.%u.%u", HIWORD(info->dwProductVersionMS),
+        LOWORD(info->dwProductVersionMS), HIWORD(info->dwProductVersionLS));
+    wchar_t* product = nullptr;
+    assert(VerQueryValueW(metadata.data(), L"\\StringFileInfo\\040904b0\\ProductVersion",
+        reinterpret_cast<void**>(&product), &size));
+    assert(product && version == product);
+    assert(info->dwFileVersionMS == info->dwProductVersionMS &&
+        info->dwFileVersionLS == info->dwProductVersionLS);
+    wchar_t* file = nullptr;
+    assert(VerQueryValueW(metadata.data(), L"\\StringFileInfo\\040904b0\\FileVersion",
+        reinterpret_cast<void**>(&file), &size));
+    assert(file && version + formatText(L".%u", LOWORD(info->dwFileVersionLS)) == file);
+    HWND dialog = CreateDialogParamW(GetModuleHandleW(nullptr), MAKEINTRESOURCEW(IDD_ABOUT_DIALOG),
+        g_hwnd, AboutDialogProc, 0);
+    assert(dialog);
+    wchar_t text[256]{};
+    assert(GetDlgItemTextW(dialog, IDC_ABOUT_VERSION, text, ARRAYSIZE(text)));
+    assert(std::wstring(text) == L"X1 SYS Island v" + version);
+    assert(reinterpret_cast<HFONT>(SendDlgItemMessageW(dialog, IDC_ABOUT_VERSION,
+        WM_GETFONT, 0, 0)) == g_metricsFont);
+    assert(DestroyWindow(dialog));
+    puts("PASS: About version from resources matches numeric/string metadata; WM_SETFONT applies the font.");
 }
 int main() {
     g_metricsFont = CreateFontW(-14,0,0,0,FW_SEMIBOLD,FALSE,FALSE,FALSE,DEFAULT_CHARSET,
@@ -305,6 +420,7 @@ int main() {
     g_hwnd=CreateWindowExW(WS_EX_TOOLWINDOW|WS_EX_NOACTIVATE,cls.lpszClassName,L"Hover test",WS_POPUP,
         -30000,-30000,ISLAND_WIDTH,COMPACT_HEIGHT,nullptr,nullptr,cls.hInstance,nullptr);
     assert(g_hwnd);
+    testAboutVersion();
     g_snapshot.cpu = 100; g_snapshot.gpu = 100; g_snapshot.temperature = 125;
     g_snapshot.tjMax = 125; g_snapshot.distanceToTjMax = 0;
     g_snapshot.used = g_snapshot.total = 64ULL * 1024 * 1024 * 1024;
@@ -318,28 +434,44 @@ int main() {
             assert(cell.label.right <= cell.value.left && cell.value.right <= ISLAND_WIDTH-12);
             SIZE size{};
             assert(GetTextExtentPoint32W(dc, values[i].c_str(), static_cast<int>(values[i].size()), &size));
-            if (size.cx > cell.value.right-cell.value.left)
-                printf("Cell %zu needs %ld px, has %ld px\n", i, size.cx, cell.value.right-cell.value.left);
+            printf("Cell %zu needs %ld px, has %ld px\n", i, size.cx, cell.value.right-cell.value.left);
             assert(size.cx <= cell.value.right-cell.value.left);
         }
         SelectObject(dc, previous);
     };
+    ensureExpandedLayout(dc);
+    auto unitFont = SelectObject(dc, g_smallFont);
+    SIZE unitSize{};
+    assert(GetTextExtentPoint32W(dc, L"rpm", 3, &unitSize));
+    assert(unitSize.cx == g_fanUnit.right - g_fanUnit.left);
+    assert(g_expandedCells[5].value.right + 4 == g_fanUnit.left);
+    assert(g_fanUnit.right == EXPANDED_CELLS[5].right);
+    SelectObject(dc, unitFont);
     auto checkExpandedCells = [&](const auto& cells, const auto& values, HFONT font) {
+        checkCells(cells, values, font);
         auto previous = SelectObject(dc, font);
         for (size_t i = 0; i < cells.size(); ++i) {
             const auto& cell = cells[i];
-            assert(cell.right <= ISLAND_WIDTH-12);
             SIZE size{};
-            assert(GetTextExtentPoint32W(dc, values[i].c_str(), static_cast<int>(values[i].size()), &size));
-            assert(size.cx <= cell.right-cell.left);
+            assert(GetTextExtentPoint32W(dc, EXPANDED_LABELS[i].c_str(),
+                static_cast<int>(EXPANDED_LABELS[i].size()), &size));
+            assert(cell.value.left - cell.label.right == 8);
+            printf("Expanded cell %zu: label %ld/%ld px, value region %ld px\n",
+                i, size.cx, cell.label.right-cell.label.left, cell.value.right-cell.value.left);
+            assert(cell.label.right-cell.label.left == size.cx);
         }
         SelectObject(dc, previous);
     };
+    assert(EXPANDED_LABELS[2] == L"iGPU" && EXPANDED_LABELS[3] == L"RAM");
+    assert(EXPANDED_LABELS[5] == L"Fan 1/Fan 2");
+    assert(g_expandedParts[3] == L"64.0/64.0 GiB (100%)");
+    assert(g_expandedParts[5] == L"8191/8191");
     checkCells(COMPACT_CELLS, g_compactParts, g_metricsFont);
-    checkExpandedCells(EXPANDED_CELLS, g_expandedParts, g_smallFont);
+    checkExpandedCells(g_expandedCells, g_expandedParts, g_smallFont);
     auto previous = SelectObject(dc, g_metricsFont);
     // CPU identity may intentionally ellipsize; the other compact labels must not.
     for (size_t i = 1; i < COMPACT_LABELS.size(); ++i) {
+        if (COMPACT_LABELS[i].empty()) continue;
         SIZE size{};
         assert(GetTextExtentPoint32W(dc, COMPACT_LABELS[i].c_str(),
             static_cast<int>(COMPACT_LABELS[i].size()), &size));
@@ -355,13 +487,13 @@ int main() {
     const std::array<std::wstring, 4> typicalValues{L"100%", L"63.7/63.7G", L"100\u00B0C/100\u00B0C", L"100%"};
     assert(g_compactParts == typicalValues);
     checkCells(COMPACT_CELLS, g_compactParts, g_metricsFont);
-    checkExpandedCells(EXPANDED_CELLS, g_expandedParts, g_smallFont);
+    checkExpandedCells(g_expandedCells, g_expandedParts, g_smallFont);
     ReleaseDC(g_hwnd,dc);
     assert(g_loadLevel==LoadLevel::Red);
     assert(levelForPercent(49)==LoadLevel::Normal);
     assert(levelForPercent(50)==LoadLevel::Yellow);
     assert(levelForPercent(80)==LoadLevel::Red);
-    puts("PASS: 620px layout, full compact labels and typical values at Segoe UI 14px, separate cells, and border thresholds.");
+    puts("PASS: 520px layout, value-only RAM and C-Pkg compact cells, and border thresholds.");
     g_snapshot.cpu=17; g_snapshot.gpu=32; g_snapshot.temperature=54;
     g_snapshot.tjMax=100; g_snapshot.distanceToTjMax=46;
     g_snapshot.used=32ULL*1024*1024*1024;
@@ -384,8 +516,8 @@ int main() {
     assert(GetCurrentObject(cacheDc, OBJ_FONT) == originalFont);
     assert(GetCurrentObject(cacheDc, OBJ_PEN) == originalPen);
     const auto compactCells = COMPACT_CELLS;
-    const auto expandedCells = EXPANDED_CELLS;
-    for (double value : {-1.0, 0.0, 9.0, 10.0, 99.0, 100.0}) {
+    const auto expandedCells = g_expandedCells;
+    for (double value : {-1.0, 0.0, 1.0, 9.0, 10.0, 99.0, 100.0}) {
         g_snapshot.cpu = g_snapshot.gpu = value;
         refreshDisplayCache();
         render(cacheDc, compactRect);
@@ -394,12 +526,15 @@ int main() {
             assert(EqualRect(&compactCells[i].value, &COMPACT_CELLS[i].value));
         }
         for (size_t i = 0; i < expandedCells.size(); ++i)
-            assert(EqualRect(&expandedCells[i], &EXPANDED_CELLS[i]));
+        {
+            assert(EqualRect(&expandedCells[i].label, &g_expandedCells[i].label));
+            assert(EqualRect(&expandedCells[i].value, &g_expandedCells[i].value));
+        }
     }
     assert(extentCalls == measured);
     ReleaseDC(g_hwnd, cacheDc);
     refreshDisplayCache();
-    puts("PASS: fixed label/value cells across N/A and digit changes, retained logo and stable GDI handles.");
+    puts("PASS: measured 8px expanded label gaps, fixed N/A/1/100 value positions, retained logo and stable GDI handles.");
     testRendering();
     WorkerSchedule schedule;
     SamplingPolicy policy;
@@ -496,7 +631,7 @@ int main() {
     assert(WaitForSingleObject(g_stopEvent, 0) == WAIT_OBJECT_0);
     CloseHandle(g_stopEvent); g_stopEvent = nullptr;
     CloseHandle(g_policyEvent); g_policyEvent = nullptr;
-    assert(!g_logoDc && !g_backBuffer.dc && !g_backBuffer.bitmap);
+    assert(!g_logoDc && !g_backBuffer.dc && !g_backBuffer.bitmap && !g_damageRegion.region);
     puts("PASS: hidden/suspend sampling policy, battery hover and exit stop signal.");
     DeleteObject(g_metricsFont); DeleteObject(g_smallFont); DeleteObject(g_intelLogo); DeleteObject(g_backgroundBrush);
     return 0;

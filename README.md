@@ -1,6 +1,6 @@
-# X1 SYS Island v0.8.1
+# X1 SYS Island v0.8.3
 
-X1 SYS Island is a Windows x64 Win32/GDI overlay for Intel CPU load, system RAM, Intel iGPU load, CPU Package temperature, and read-only fan telemetry. Its layout is 620x46 px collapsed and 620x128 px expanded, with fixed label/value cells sized to show the full RAM, C-Pkg, and iGPU labels.
+X1 SYS Island is a Windows x64 Win32/GDI overlay for Intel CPU load, system RAM, Intel iGPU load, CPU Package temperature, and read-only fan telemetry. Its layout is 520x46 px collapsed and 520x128 px expanded matching X1 AI Island width, with value-only RAM and C-Pkg compact cells to save space.
 
 ## Screenshots
 
@@ -44,8 +44,10 @@ The expanded view has three rows and two columns:
 | Left | Right |
 | --- | --- |
 | CPU Load | CPU Package/TjMax |
-| RAM used/total and percentage | iGPU Load |
-| Fan Mode | Fan 1 and Fan 2 (RPM) |
+| iGPU | RAM used/total in GiB and percentage |
+| Fan Mode | Fan 1/Fan 2 with a shared rpm unit |
+
+Expanded labels are left-aligned and values are right-aligned in separate fixed regions. Only changed values repaint; fan speeds use `2438/2232 rpm` formatting.
 
 ## Colors
 
@@ -58,7 +60,7 @@ The collapsed CPU label follows the same load-based color logic as the RTX 3080 
 - **CPU load:** PDH `Processor(_Total)`.
 - **RAM:** `GlobalMemoryStatusEx`; the collapsed value is GiB.
 - **Intel iGPU:** DXGI identifies the adapter LUID, then PDH GPU Engine counters are aggregated per matching engine and the busiest engine is displayed.
-- **CPU Package/TjMax:** MSR `0x1A2` provides the validated TjMax value and `0x1B1` provides the digital `Distance to TjMax` readout. The app calculates CPU Package as `TjMax - Distance to TjMax` and displays `C-Pkg <package>°C/<TjMax>°C` when collapsed. No HWiNFO, LibreHardwareMonitor, or web service is used.
+- **CPU Package/TjMax:** MSR `0x1A2` provides the validated TjMax value and `0x1B1` provides the digital `Distance to TjMax` readout. The app calculates CPU Package as `TjMax - Distance to TjMax` and displays `<package>°C/<TjMax>°C` without a label when collapsed. No HWiNFO, LibreHardwareMonitor, or web service is used.
 - **Fans:** read-only `Global\\X1FanTelemetryV1` version 2 mapping produced by X1FanService. The mapping is opened and mapped with read access only; sequence, version, and data age (under five seconds) are validated. Missing or stale data displays `N/A`.
 
 SYS does not install, start, stop, or control services or fans. Fan mode changes made by AI Island are reflected automatically. Missing data or insufficient permission is shown as `N/A`.
@@ -80,7 +82,22 @@ Run `tests\\test.bat` for telemetry, fan mapping, and sensor conversion checks. 
 
 ## Packaging
 
-`package.ps1` builds an optimized executable and creates `dist/X1-SYS-Island-v0.8.1.zip` containing the executable, `IntelMSR.bin`, this README, third-party notices, and required licenses.
+`package.ps1` builds an optimized executable and creates `dist/X1-SYS-Island-v0.8.3.zip` containing the executable, `IntelMSR.bin`, this README, third-party notices, and required licenses.
+
+## v0.8.3 changes
+
+- Organizes expanded information as CPU/CPU Package, iGPU/RAM, and Fan Mode/Fan 1/Fan 2 in three rows and two columns.
+- Left-aligns fixed labels and right-aligns values, preserving cached layout and value-only partial repainting.
+- Keeps 520 px width and GiB units; fan speeds share one static lowercase `rpm` unit.
+- Extends regression tests for measured text fit, right alignment, and exact value-only dirty regions.
+
+## v0.8.2 changes
+
+- Uses 520 px width in both views; compact RAM and CPU Package display values without labels.
+- Separates expanded labels and values with cached text extents and an 8 px gap; only changed values repaint.
+- Reuses the damage region and removes per-render region-enumeration allocations while preserving exact clipped painting.
+- Derives About and executable metadata from one version definition in the resource file; package names follow executable metadata.
+- Adds regression coverage for resource versions, fixed value positions, value-only damage, and retained paint resources.
 
 ## v0.8.1 changes
 

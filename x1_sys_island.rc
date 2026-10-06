@@ -1,6 +1,19 @@
 #include <windows.h>
 #include "resource.h"
 
+#define APP_VERSION_MAJOR 0
+#define APP_VERSION_MINOR 8
+#define APP_VERSION_PATCH 3
+#define APP_VERSION_BUILD 0
+#define STRINGIFY_IMPL(value) #value
+#define STRINGIFY(value) STRINGIFY_IMPL(value)
+#define APP_VERSION STRINGIFY(APP_VERSION_MAJOR.APP_VERSION_MINOR.APP_VERSION_PATCH)
+#define APP_FILE_VERSION STRINGIFY(APP_VERSION_MAJOR.APP_VERSION_MINOR.APP_VERSION_PATCH.APP_VERSION_BUILD)
+#define ABOUT_VERSION_IMPL(major,minor,patch) STRINGIFY(X1 SYS Island v##major.minor.patch)
+#define ABOUT_VERSION(major,minor,patch) ABOUT_VERSION_IMPL(major,minor,patch)
+#define APP_ABOUT_VERSION ABOUT_VERSION(APP_VERSION_MAJOR,APP_VERSION_MINOR,APP_VERSION_PATCH)
+#define APP_VERSION_NUMERIC APP_VERSION_MAJOR,APP_VERSION_MINOR,APP_VERSION_PATCH,APP_VERSION_BUILD
+
 IDB_INTEL_LOGO BITMAP "assets/intel_logo.bmp"
 IDB_3S_LOGO BITMAP "assets/3s_logo_about.bmp"
 
@@ -11,7 +24,7 @@ FONT 9, "Segoe UI"
 BEGIN
     CONTROL         "",IDC_ABOUT_LOGO,"Static",
                     SS_BITMAP | SS_CENTERIMAGE,10,5,185,43
-    LTEXT           "X1 SYS Island v0.8.1",IDC_ABOUT_VERSION,
+    LTEXT           APP_ABOUT_VERSION,IDC_ABOUT_VERSION,
                     8,48,189,11,SS_CENTER
     LTEXT           "Intel CPU, RAM and iGPU Monitor",IDC_ABOUT_SUBTITLE,
                     8,61,189,10,SS_CENTER
@@ -23,8 +36,8 @@ BEGIN
 END
 
 VS_VERSION_INFO VERSIONINFO
- FILEVERSION 0,8,1,0
- PRODUCTVERSION 0,8,1,0
+ FILEVERSION APP_VERSION_NUMERIC
+ PRODUCTVERSION APP_VERSION_NUMERIC
  FILEFLAGSMASK 0x3fL
 #ifdef _DEBUG
  FILEFLAGS 0x1L
@@ -41,12 +54,12 @@ BEGIN
         BEGIN
             VALUE "CompanyName", "3S Intersoft JSC"
             VALUE "FileDescription", "X1 SYS Island"
-            VALUE "FileVersion", "0.8.1.0"
+            VALUE "FileVersion", APP_FILE_VERSION
             VALUE "InternalName", "X1-SYS-Island"
             VALUE "LegalCopyright", "Developed with Codex and Curiosity"
             VALUE "OriginalFilename", "X1-SYS-Island.exe"
             VALUE "ProductName", "X1 SYS Island"
-            VALUE "ProductVersion", "0.8.1"
+            VALUE "ProductVersion", APP_VERSION
         END
     END
     BLOCK "VarFileInfo"
