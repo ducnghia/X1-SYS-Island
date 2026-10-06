@@ -88,7 +88,7 @@ void releaseLogoDc() {
 HBRUSH g_backgroundBrush;
 std::array<std::wstring, 4> g_compactParts;
 
-std::array<std::wstring, 6> g_expandedParts;
+std::array<std::wstring, 9> g_expandedParts;
 
 
 POINT g_dragStart;
@@ -125,7 +125,7 @@ enum class LoadLevel {
 LoadLevel g_loadLevel = LoadLevel::Normal;
 void ensureExpandedLayout(HDC dc);
 void invalidateDisplayChanges(const std::array<std::wstring, 4>& compact,
-    const std::array<std::wstring, 6>& expanded, double cpu, LoadLevel level);
+    const std::array<std::wstring, 9>& expanded, double cpu, LoadLevel level);
 
 struct HotkeyOption {
     UINT modifiers;
@@ -398,13 +398,14 @@ void refreshDisplayCache() {
     };
     g_expandedParts = {
         stats.cpu >= 0 ? formatText(L"%.0f%%", stats.cpu) : L"N/A",
-        stats.temperature >= 0 && stats.tjMax >= 0
-            ? formatText(L"%.0f\u00B0C/%d\u00B0C", stats.temperature, stats.tjMax)
-            : L"N/A",
+        stats.temperature >= 0 ? formatText(L"%.0f\u00B0C", stats.temperature) : L"N/A",
+        stats.tjMax >= 0 ? formatText(L"%d\u00B0C", stats.tjMax) : L"N/A",
         stats.gpu >= 0 ? formatText(L"%.0f%%", stats.gpu) : L"N/A",
-        stats.total ? formatText(L"%.1f/%.1f GiB (%u%%)", stats.used/GIB, stats.total/GIB, ramPercent) : L"N/A",
+        stats.total ? formatText(L"%.1f/%.1f GiB", stats.used/GIB, stats.total/GIB) : L"N/A",
+        stats.total ? formatText(L"%u%%", ramPercent) : L"N/A",
         fanModeName(stats.fans),
-        stats.fans.ok ? formatText(L"%lu/%lu", stats.fans.fan1, stats.fans.fan2) : L"N/A"
+        stats.fans.ok ? formatText(L"%lu", stats.fans.fan1) : L"N/A",
+        stats.fans.ok ? formatText(L"%lu", stats.fans.fan2) : L"N/A"
     };
     invalidateDisplayChanges(oldCompact, oldExpanded, oldCpu, oldLevel);
 }
@@ -444,40 +445,31 @@ const std::array<TextCell, 4> COMPACT_CELLS{{
     {{0, 0, 0, 0},     {284, 9, 388, 37}},
     {{404, 9, 448, 37}, {450, 9, 506, 37}}
 }};
-const std::array<RECT, 6> EXPANDED_CELLS{{
-    {14, 46, 256, 71},   // CPU Load
-    {266, 46, 508, 71},  // CPU Package/TjMax
-    {14, 71, 256, 96},   // iGPU
-    {266, 71, 508, 96},  // RAM
-    {14, 96, 256, 121},  // Fan Mode
-    {266, 96, 508, 121}  // Fan 1 & Fan 2
+const std::array<RECT, 9> EXPANDED_CELLS{{
+    {14, 46, 172, 71}, {182, 46, 340, 71}, {350, 46, 508, 71},
+    {14, 71, 172, 96}, {182, 71, 340, 96}, {350, 71, 508, 96},
+    {14, 96, 172, 121}, {182, 96, 340, 121}, {350, 96, 508, 121}
 }};
-const std::array<std::wstring, 6> EXPANDED_LABELS{
-    g_cpuIdentity.expanded, L"CPU Package/TjMax", L"iGPU", L"RAM", L"Fan Mode", L"Fan 1/Fan 2"};
-std::array<TextCell, 6> g_expandedCells{};
-RECT g_fanUnit{};
+const std::array<std::wstring, 9> EXPANDED_LABELS{
+    L"CPU", L"CPU Package", L"TjMax", L"iGPU", L"RAM", L"RAM Usage",
+    L"Fan Mode", L"Fan 1 (rpm)", L"Fan 2 (rpm)"};
+std::array<TextCell, 9> g_expandedCells{};
 HFONT g_layoutFont = nullptr;
 void ensureExpandedLayout(HDC dc) {
     if (g_layoutFont == g_smallFont || !g_smallFont) return;
     const auto previous = SelectObject(dc, g_smallFont);
     // Measure once per font, not per sample. Reserve worst-case normal values.
-    const wchar_t* widest[] = {L"100%", L"125\u00B0C/125\u00B0C", L"100%",
-        L"64.0/64.0 GiB (100%)", L"Performance", L"8191/8191"};
-    SIZE unit{};
-    GetTextExtentPoint32W(dc, L"rpm", 3, &unit);
+    const wchar_t* widest[] = {L"100%", L"125\u00B0C", L"125\u00B0C", L"100%",
+        L"64.0/64.0 GiB", L"100%", L"Performance", L"9999", L"9999"};
     for (size_t i = 0; i < g_expandedCells.size(); ++i) {
-        RECT row = EXPANDED_CELLS[i];
-        if (i == 5) {
-            g_fanUnit = {row.right - unit.cx, row.top, row.right, row.bottom};
-            row.right = g_fanUnit.left - 4;
-        }
+        const RECT row = EXPANDED_CELLS[i];
         SIZE label{}, value{};
         GetTextExtentPoint32W(dc, EXPANDED_LABELS[i].c_str(),
             static_cast<int>(EXPANDED_LABELS[i].size()), &label);
         GetTextExtentPoint32W(dc, widest[i], lstrlenW(widest[i]), &value);
-        const LONG end = std::min(row.left + label.cx, row.right - value.cx - 8);
+        const LONG end = row.left + label.cx;
         g_expandedCells[i] = {{row.left, row.top, end, row.bottom},
-            {end + 8, row.top, row.right, row.bottom}};
+            {end + 8, row.top, end + 8 + value.cx, row.bottom}};
     }
     SelectObject(dc, previous);
     g_layoutFont = g_smallFont;
@@ -498,7 +490,7 @@ void invalidateAnimation(HWND hwnd) {
     if (g_cpuLoad >= 49.5) InvalidateRect(hwnd, &COMPACT_CELLS[0].label, FALSE);
 }
 void invalidateDisplayChanges(const std::array<std::wstring, 4>& compact,
-    const std::array<std::wstring, 6>& expanded, double cpu, LoadLevel level) {
+    const std::array<std::wstring, 9>& expanded, double cpu, LoadLevel level) {
     if (!g_hwnd) return;
     if (g_layoutFont != g_smallFont) {
         HDC dc = GetDC(g_hwnd);
@@ -610,8 +602,6 @@ void render(HDC dc, const RECT& rc, HRGN damage = nullptr) {
             text(EXPANDED_LABELS[i], g_expandedCells[i].label, TEXT_COLOR);
             text(g_expandedParts[i], g_expandedCells[i].value, TEXT_COLOR, DT_RIGHT);
         }
-        static const std::wstring unit = L"rpm";
-        text(unit, g_fanUnit, TEXT_COLOR);
     }
     RestoreDC(dc, saved);
 }

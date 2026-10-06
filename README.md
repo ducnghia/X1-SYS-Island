@@ -39,15 +39,20 @@ Keep `IntelMSR.bin` beside `X1-SYS-Island.exe`. Start the executable and approve
 - Starting the executable again restores the existing hidden instance.
 - Right-click for expand/collapse, reset position, hide, hover auto-hide, shortcut settings, About, and Exit.
 
-The expanded view has three rows and two columns:
+The expanded view has three rows and six columns: three adjacent label/value pairs per row.
 
-| Left | Right |
-| --- | --- |
-| CPU Load | CPU Package/TjMax |
-| iGPU | RAM used/total in GiB and percentage |
-| Fan Mode | Fan 1/Fan 2 with a shared rpm unit |
+| First pair | Second pair | Third pair |
+| --- | --- | --- |
+| CPU / percentage | CPU Package / °C | TjMax / °C |
+| iGPU / percentage | RAM / used/total GiB | RAM Usage / percentage |
+| Fan Mode / mode | Fan 1 (rpm) / speed | Fan 2 (rpm) / speed |
 
-Expanded labels are left-aligned and values are right-aligned in separate fixed regions. Only changed values repaint; fan speeds use `2438/2232 rpm` formatting.
+Each group is 158 px wide with 10 px between groups. Labels are left-aligned;
+values are right-aligned in narrow dedicated regions, with an 8 px label gap.
+Geometry is measured once per font and never depends on live digits. The 14 px
+font, 520x128 px expanded size, and compact view are unchanged. Temperatures,
+RAM percentage, and both fan speeds update independently; only changed values
+repaint, not labels. Fan units are static lowercase rpm in both labels.
 
 ## Colors
 

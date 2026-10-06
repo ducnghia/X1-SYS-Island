@@ -37,9 +37,10 @@ int TestDrawTextW(HDC dc, LPCWSTR text, int count, LPRECT rect, UINT flags) {
     ++textCalls;
     lastTextRect = *rect;
     lastTextFlags = flags;
-    if (countExpandedLabels && (wcscmp(text, L"RAM") == 0 || wcscmp(text, L"iGPU") == 0 ||
-        wcscmp(text, L"CPU Package/TjMax") == 0 || wcscmp(text, L"Fan Mode") == 0 ||
-        wcscmp(text, L"Fan 1/Fan 2") == 0 || wcscmp(text, L"rpm") == 0))
+    if (countExpandedLabels && (wcscmp(text, L"CPU") == 0 || wcscmp(text, L"CPU Package") == 0 ||
+        wcscmp(text, L"TjMax") == 0 || wcscmp(text, L"iGPU") == 0 || wcscmp(text, L"RAM") == 0 ||
+        wcscmp(text, L"RAM Usage") == 0 || wcscmp(text, L"Fan Mode") == 0 ||
+        wcscmp(text, L"Fan 1 (rpm)") == 0 || wcscmp(text, L"Fan 2 (rpm)") == 0))
         ++expandedLabelCalls;
     return DrawTextW(dc, text, count, rect, flags);
 }
@@ -299,7 +300,7 @@ void testRendering() {
     g_snapshot.fans.fan2 = 900;
     refreshDisplayCache();
     damage = CreateRectRgn(0,0,0,0);
-    expected = CreateRectRgnIndirect(&g_expandedCells[5].value);
+    expected = CreateRectRgnIndirect(&g_expandedCells[8].value);
     GetUpdateRgn(g_hwnd, damage, FALSE);
     assert(EqualRgn(damage, expected));
     DeleteObject(damage); DeleteObject(expected);
@@ -359,7 +360,7 @@ void testRendering() {
             assert(GetPixel(reference.dc,x,y) == GetPixel(g_backBuffer.dc,x,y));
     textCalls = logoCalls = 0;
     InvalidateRect(g_hwnd, nullptr, TRUE); UpdateWindow(g_hwnd);
-    assert(textCalls == 19 && logoCalls == 1); // 6 compact + 12 expanded + static rpm.
+    assert(textCalls == 24 && logoCalls == 1); // 6 compact + 18 expanded.
     assert(g_damageRegion.region == retainedDamage && regionCreates == createdRegions);
     assert(extentCalls == measuredExtents);
     ReleaseDC(g_hwnd,target);
@@ -424,7 +425,7 @@ int main() {
     g_snapshot.cpu = 100; g_snapshot.gpu = 100; g_snapshot.temperature = 125;
     g_snapshot.tjMax = 125; g_snapshot.distanceToTjMax = 0;
     g_snapshot.used = g_snapshot.total = 64ULL * 1024 * 1024 * 1024;
-    g_snapshot.fans = {8191,8191,2,true};
+    g_snapshot.fans = {9999,9999,2,true};
     refreshDisplayCache();
     HDC dc=GetDC(g_hwnd);
     auto checkCells = [&](const auto& cells, const auto& values, HFONT font) {
@@ -440,13 +441,6 @@ int main() {
         SelectObject(dc, previous);
     };
     ensureExpandedLayout(dc);
-    auto unitFont = SelectObject(dc, g_smallFont);
-    SIZE unitSize{};
-    assert(GetTextExtentPoint32W(dc, L"rpm", 3, &unitSize));
-    assert(unitSize.cx == g_fanUnit.right - g_fanUnit.left);
-    assert(g_expandedCells[5].value.right + 4 == g_fanUnit.left);
-    assert(g_fanUnit.right == EXPANDED_CELLS[5].right);
-    SelectObject(dc, unitFont);
     auto checkExpandedCells = [&](const auto& cells, const auto& values, HFONT font) {
         checkCells(cells, values, font);
         auto previous = SelectObject(dc, font);
@@ -459,13 +453,19 @@ int main() {
             printf("Expanded cell %zu: label %ld/%ld px, value region %ld px\n",
                 i, size.cx, cell.label.right-cell.label.left, cell.value.right-cell.value.left);
             assert(cell.label.right-cell.label.left == size.cx);
+            assert(cell.value.right <= EXPANDED_CELLS[i].right);
+            assert(EXPANDED_CELLS[i].right - EXPANDED_CELLS[i].left == 158);
+            assert(size.cy <= cell.label.bottom-cell.label.top);
         }
         SelectObject(dc, previous);
     };
-    assert(EXPANDED_LABELS[2] == L"iGPU" && EXPANDED_LABELS[3] == L"RAM");
-    assert(EXPANDED_LABELS[5] == L"Fan 1/Fan 2");
-    assert(g_expandedParts[3] == L"64.0/64.0 GiB (100%)");
-    assert(g_expandedParts[5] == L"8191/8191");
+    assert((EXPANDED_LABELS == std::array<std::wstring, 9>{
+        L"CPU", L"CPU Package", L"TjMax", L"iGPU", L"RAM", L"RAM Usage",
+        L"Fan Mode", L"Fan 1 (rpm)", L"Fan 2 (rpm)"}));
+    assert(g_expandedParts[1] == L"125\u00B0C" && g_expandedParts[2] == L"125\u00B0C");
+    assert(g_expandedParts[4] == L"64.0/64.0 GiB");
+    assert(g_expandedParts[5] == L"100%");
+    assert(g_expandedParts[7] == L"9999" && g_expandedParts[8] == L"9999");
     checkCells(COMPACT_CELLS, g_compactParts, g_metricsFont);
     checkExpandedCells(g_expandedCells, g_expandedParts, g_smallFont);
     auto previous = SelectObject(dc, g_metricsFont);
@@ -484,6 +484,7 @@ int main() {
     g_snapshot.temperature = 100; g_snapshot.tjMax = 100;
     g_snapshot.used = g_snapshot.total = static_cast<ULONGLONG>(63.7 * 1073741824.0);
     refreshDisplayCache();
+    assert(g_expandedParts[4] == L"63.7/63.7 GiB");
     const std::array<std::wstring, 4> typicalValues{L"100%", L"63.7/63.7G", L"100\u00B0C/100\u00B0C", L"100%"};
     assert(g_compactParts == typicalValues);
     checkCells(COMPACT_CELLS, g_compactParts, g_metricsFont);
