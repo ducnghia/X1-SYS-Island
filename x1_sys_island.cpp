@@ -103,6 +103,7 @@ bool g_userHidden = false;
 bool g_hoverHidden = false;
 bool g_autoHideOnHover = true;
 bool g_hotkeyRegistered = false;
+bool g_contextHotkeyRegistered = false;
 int g_hotkeyChoice = 0;
 
 const UINT_PTR STATS_TIMER_ID = 1;
@@ -112,6 +113,7 @@ const UINT_PTR ANIMATION_TIMER_ID = 4;
 const UINT_PTR TELEMETRY_HEALTH_TIMER_ID = 5;
 const UINT ANIMATION_INTERVAL_MS = 100;
 const int HOTKEY_ID = 100;
+const int CONTEXT_MENU_HOTKEY_ID = 200;
 const UINT WM_SHOW_EXISTING_ISLAND = WM_USER + 1;
 const wchar_t SINGLE_INSTANCE_MUTEX[] = L"Global\\X1SYSIslandMutex";
 
@@ -632,6 +634,52 @@ void paint() {
     EndPaint(g_hwnd, &ps);
 }
 
+void showContextMenu(HWND hwnd, POINT p, UINT alignFlags = 0) {
+    cancelHover(hwnd);
+    HMENU m = CreatePopupMenu();
+    AppendMenuW(m, MF_STRING, 1, L"Expand / Collapse");
+    AppendMenuW(m, MF_STRING, 6, L"Reset to left corner");
+    std::wstring hideLabel = L"Hide Island\t";
+    if (g_hotkeyChoice >= 0 && g_hotkeyChoice < static_cast<int>(ARRAYSIZE(HOTKEYS))) {
+        hideLabel += HOTKEYS[g_hotkeyChoice].label;
+    } else {
+        hideLabel += L"N/A";
+    }
+    AppendMenuW(m, MF_STRING, 3, hideLabel.c_str());
+    AppendMenuW(m, MF_STRING | (g_autoHideOnHover ? MF_CHECKED : 0), 4, L"Auto-hide on hover");
+    AppendMenuW(m, MF_SEPARATOR, 0, nullptr);
+
+    HMENU shortcuts = CreatePopupMenu();
+    for (int i = 0; i < static_cast<int>(ARRAYSIZE(HOTKEYS)); ++i) {
+        UINT flags = MF_STRING | (i == g_hotkeyChoice ? MF_CHECKED : 0);
+        AppendMenuW(shortcuts, flags, 100 + i, HOTKEYS[i].label);
+    }
+    AppendMenuW(m, MF_POPUP, reinterpret_cast<UINT_PTR>(shortcuts), L"Hide / show shortcut");
+    AppendMenuW(m, MF_SEPARATOR, 0, nullptr);
+
+    AppendMenuW(m, MF_STRING, 5, L"About X1 SYS Island");
+    AppendMenuW(m, MF_STRING, 2, L"Exit");
+
+    SetForegroundWindow(hwnd);
+    g_contextOpen = true;
+    int cmd = TrackPopupMenu(m, TPM_RETURNCMD | TPM_RIGHTBUTTON | alignFlags, p.x, p.y, 0, hwnd, nullptr);
+    g_contextOpen = false;
+    DestroyMenu(m);
+
+    if (cmd == 1) { g_expanded = !g_expanded; setWindowSize(); }
+    if (cmd == 6) positionLeft(hwnd);
+    if (cmd == 3) toggleIsland(hwnd);
+    if (cmd == 4) {
+        g_autoHideOnHover = !g_autoHideOnHover;
+        saveAutoHideOnHover(g_autoHideOnHover);
+        cancelHover(hwnd);
+    }
+    if (cmd >= 100 && cmd < 100 + static_cast<int>(ARRAYSIZE(HOTKEYS))) selectHotkey(hwnd, cmd - 100);
+
+    if (cmd == 5) showAbout();
+    if (cmd == 2) DestroyWindow(hwnd);
+}
+
 LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     switch (msg) {
     case WM_SHOWWINDOW:
@@ -670,6 +718,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         g_autoHideOnHover = loadAutoHideOnHover();
         if (!registerToggleHotkey(hwnd, g_hotkeyChoice))
             MessageBoxW(hwnd, L"Hide/show shortcut is already in use. Choose another from the right-click menu. Launch this app again to restore it if hidden.", L"X1 SYS Island", MB_OK | MB_ICONWARNING);
+        g_contextHotkeyRegistered = RegisterHotKey(hwnd, CONTEXT_MENU_HOTKEY_ID, MOD_CONTROL | MOD_ALT | MOD_NOREPEAT, 'D') != FALSE;
         startAnimation(hwnd);
         return 0;
 
@@ -716,7 +765,19 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         }
         return 0;
     case WM_HOTKEY:
-        if (wp == HOTKEY_ID) toggleIsland(hwnd);
+        if (wp == HOTKEY_ID) {
+            toggleIsland(hwnd);
+        } else if (wp == CONTEXT_MENU_HOTKEY_ID) {
+            if (!g_contextOpen) {
+                if (g_userHidden || g_hoverHidden || !IsWindowVisible(hwnd)) {
+                    showIsland(hwnd);
+                }
+                RECT r{};
+                GetWindowRect(hwnd, &r);
+                POINT center{ r.left + (r.right - r.left) / 2, r.top + (r.bottom - r.top) / 2 };
+                showContextMenu(hwnd, center, TPM_CENTERALIGN);
+            }
+        }
         return 0;
 
     case WM_LBUTTONDBLCLK:
@@ -752,50 +813,8 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         cancelHover(hwnd);
         return 0;
     case WM_RBUTTONUP: {
-        cancelHover(hwnd);
-        HMENU m = CreatePopupMenu();
-        AppendMenuW(m, MF_STRING, 1, L"Expand / Collapse");
-        AppendMenuW(m, MF_STRING, 6, L"Reset to left corner");
-        std::wstring hideLabel = L"Hide Island\t";
-        if (g_hotkeyChoice >= 0 && g_hotkeyChoice < static_cast<int>(ARRAYSIZE(HOTKEYS))) {
-            hideLabel += HOTKEYS[g_hotkeyChoice].label;
-        } else {
-            hideLabel += L"N/A";
-        }
-        AppendMenuW(m, MF_STRING, 3, hideLabel.c_str());
-        AppendMenuW(m, MF_STRING | (g_autoHideOnHover ? MF_CHECKED : 0), 4, L"Auto-hide on hover");
-        AppendMenuW(m, MF_SEPARATOR, 0, nullptr);
-
-        HMENU shortcuts = CreatePopupMenu();
-        for (int i = 0; i < static_cast<int>(ARRAYSIZE(HOTKEYS)); ++i) {
-            UINT flags = MF_STRING | (i == g_hotkeyChoice ? MF_CHECKED : 0);
-            AppendMenuW(shortcuts, flags, 100 + i, HOTKEYS[i].label);
-        }
-        AppendMenuW(m, MF_POPUP, reinterpret_cast<UINT_PTR>(shortcuts), L"Hide / show shortcut");
-        AppendMenuW(m, MF_SEPARATOR, 0, nullptr);
-
-        AppendMenuW(m, MF_STRING, 5, L"About X1 SYS Island");
-        AppendMenuW(m, MF_STRING, 2, L"Exit");
-
         POINT p{}; GetCursorPos(&p);
-        SetForegroundWindow(hwnd);
-        g_contextOpen = true;
-        int cmd = TrackPopupMenu(m, TPM_RETURNCMD | TPM_RIGHTBUTTON, p.x, p.y, 0, hwnd, nullptr);
-        g_contextOpen = false;
-        DestroyMenu(m);
-
-        if (cmd == 1) { g_expanded = !g_expanded; setWindowSize(); }
-        if (cmd == 6) positionLeft(hwnd);
-        if (cmd == 3) toggleIsland(hwnd);
-        if (cmd == 4) {
-            g_autoHideOnHover = !g_autoHideOnHover;
-            saveAutoHideOnHover(g_autoHideOnHover);
-            cancelHover(hwnd);
-        }
-        if (cmd >= 100 && cmd < 100 + static_cast<int>(ARRAYSIZE(HOTKEYS))) selectHotkey(hwnd, cmd - 100);
-
-        if (cmd == 5) showAbout();
-        if (cmd == 2) DestroyWindow(hwnd);
+        showContextMenu(hwnd, p);
         return 0;
     }
 
@@ -824,6 +843,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         KillTimer(hwnd, ANIMATION_TIMER_ID);
         KillTimer(hwnd, TELEMETRY_HEALTH_TIMER_ID);
         if (g_hotkeyRegistered) UnregisterHotKey(hwnd, HOTKEY_ID);
+        if (g_contextHotkeyRegistered) UnregisterHotKey(hwnd, CONTEXT_MENU_HOTKEY_ID);
         g_backBuffer.release();
         g_damageRegion.release();
         releaseLogoDc();

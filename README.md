@@ -34,6 +34,7 @@ Keep `IntelMSR.bin` beside `X1-SYS-Island.exe`. Start the executable and approve
 
 - `Ctrl+Shift+S`: show or hide the island (default shortcut).
 - `Ctrl+Shift+D`: the alternate shortcut exposed by the context menu.
+- `Ctrl+Alt+D`: open the context menu from the center of the island.
 - Auto-hide on hover is enabled by default: hover for one second to hide for five seconds, then show again. Disable it from the context menu to keep the island visible.
 - Left-drag to move; double-click to expand or collapse.
 - Starting the executable again restores the existing hidden instance.
