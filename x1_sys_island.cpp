@@ -417,7 +417,7 @@ void positionLeft(HWND hwnd) {
     MONITORINFO info{sizeof(info)};
     GetMonitorInfoW(MonitorFromPoint(POINT{0,0}, MONITOR_DEFAULTTOPRIMARY), &info);
     RECT own{}; GetWindowRect(hwnd, &own);
-    int x = info.rcWork.left + 18, y = info.rcWork.top + 18;
+    int x = info.rcWork.left + 18, y = info.rcWork.top + 36;
     RECT target{x, y, x + own.right - own.left, y + own.bottom - own.top};
     HWND ai = FindWindowW(L"X1AIIslandClass", L"X1 AI Island");
     RECT other{}, intersection{};
@@ -945,7 +945,7 @@ int WINAPI wWinMain(HINSTANCE h, HINSTANCE, LPWSTR, int) {
     const int initialX = std::max(0, (sw - initialWidth) / 2);
     g_hwnd = CreateWindowExW(WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE | WS_EX_LAYERED,
         wc.lpszClassName, L"X1 SYS Island", WS_POPUP,
-        initialX, 18, initialWidth, 46, nullptr, nullptr, h, nullptr);
+        initialX, 36, initialWidth, 46, nullptr, nullptr, h, nullptr);
     if (!g_hwnd) return 1;
     g_stopEvent = CreateEventW(nullptr, TRUE, FALSE, nullptr);
     g_policyEvent = CreateEventW(nullptr, FALSE, FALSE, nullptr);
