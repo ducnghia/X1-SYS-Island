@@ -637,16 +637,16 @@ void paint() {
 void showContextMenu(HWND hwnd, POINT p, UINT alignFlags = 0) {
     cancelHover(hwnd);
     HMENU m = CreatePopupMenu();
-    AppendMenuW(m, MF_STRING, 1, L"Expand / Collapse");
-    AppendMenuW(m, MF_STRING, 6, L"Reset to left corner");
-    std::wstring hideLabel = L"Hide Island\t";
+    AppendMenuW(m, MF_STRING, 1, L"&Expand / Collapse");
+    AppendMenuW(m, MF_STRING, 6, L"&Reset to left corner");
+    std::wstring hideLabel = L"&Hide Island\t";
     if (g_hotkeyChoice >= 0 && g_hotkeyChoice < static_cast<int>(ARRAYSIZE(HOTKEYS))) {
         hideLabel += HOTKEYS[g_hotkeyChoice].label;
     } else {
         hideLabel += L"N/A";
     }
     AppendMenuW(m, MF_STRING, 3, hideLabel.c_str());
-    AppendMenuW(m, MF_STRING | (g_autoHideOnHover ? MF_CHECKED : 0), 4, L"Auto-hide on hover");
+    AppendMenuW(m, MF_STRING | (g_autoHideOnHover ? MF_CHECKED : 0), 4, L"&Auto-hide on hover");
     AppendMenuW(m, MF_SEPARATOR, 0, nullptr);
 
     HMENU shortcuts = CreatePopupMenu();
@@ -654,13 +654,14 @@ void showContextMenu(HWND hwnd, POINT p, UINT alignFlags = 0) {
         UINT flags = MF_STRING | (i == g_hotkeyChoice ? MF_CHECKED : 0);
         AppendMenuW(shortcuts, flags, 100 + i, HOTKEYS[i].label);
     }
-    AppendMenuW(m, MF_POPUP, reinterpret_cast<UINT_PTR>(shortcuts), L"Hide / show shortcut");
+    AppendMenuW(m, MF_POPUP, reinterpret_cast<UINT_PTR>(shortcuts), L"Hide / show &shortcut");
     AppendMenuW(m, MF_SEPARATOR, 0, nullptr);
 
-    AppendMenuW(m, MF_STRING, 5, L"About X1 SYS Island");
-    AppendMenuW(m, MF_STRING, 2, L"Exit");
+    AppendMenuW(m, MF_STRING, 5, L"A&bout X1 SYS Island");
+    AppendMenuW(m, MF_STRING, 2, L"E&xit");
 
     SetForegroundWindow(hwnd);
+    SendMessageW(hwnd, WM_CHANGEUISTATE, MAKEWPARAM(UIS_CLEAR, UISF_HIDEACCEL), 0);
     g_contextOpen = true;
     int cmd = TrackPopupMenu(m, TPM_RETURNCMD | TPM_RIGHTBUTTON | alignFlags, p.x, p.y, 0, hwnd, nullptr);
     g_contextOpen = false;
