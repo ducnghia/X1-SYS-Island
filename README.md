@@ -1,4 +1,4 @@
-# X1 SYS Island v0.8.3
+# X1 SYS Island v0.8.4
 
 X1 SYS Island is a Windows x64 Win32/GDI overlay for Intel CPU load, system RAM, Intel iGPU load, CPU Package temperature, and read-only fan telemetry. Its layout is 520x46 px collapsed and 520x128 px expanded matching X1 AI Island width, with value-only RAM and C-Pkg compact cells to save space.
 
@@ -88,7 +88,13 @@ Run `tests\\test.bat` for telemetry, fan mapping, and sensor conversion checks. 
 
 ## Packaging
 
-`package.ps1` builds an optimized executable and creates `dist/X1-SYS-Island-v0.8.3.zip` containing the executable, `IntelMSR.bin`, this README, third-party notices, and required licenses.
+`package.ps1` builds an optimized executable and creates `dist/X1-SYS-Island-v0.8.4.zip` containing the executable, `IntelMSR.bin`, this README, third-party notices, and required licenses.
+
+## v0.8.4 changes
+
+- Keeps context-menu access-key underlines visible when opened by right-click or `Ctrl+Alt+D`, including repeated mouse/keyboard transitions.
+- Preserves Windows focus-cue behavior while preventing accelerator cues from being hidden again.
+- Adds regression coverage for popup initialization and repeated UI-state changes; About and executable metadata report v0.8.4.
 
 ## v0.8.3 changes
 

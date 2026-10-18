@@ -373,6 +373,51 @@ void testRendering() {
     puts("PASS: exact damage, animation-only draws, pixel-equivalent repair, exposure, resize and stable backbuffer handles.");
 }
 #pragma comment(lib, "version.lib")
+void testMenuUiState() {
+    const UINT stateFlags = UISF_HIDEACCEL | UISF_HIDEFOCUS | UISF_ACTIVE;
+    const UINT savedState = static_cast<UINT>(SendMessageW(g_hwnd, WM_QUERYUISTATE, 0, 0));
+    auto queryState = [] {
+        return static_cast<UINT>(SendMessageW(g_hwnd, WM_QUERYUISTATE, 0, 0));
+    };
+    auto seedState = [&](UINT state) {
+        // Bypass the application policy so popup initialization must repair it.
+        DefWindowProcW(g_hwnd, WM_UPDATEUISTATE, MAKEWPARAM(UIS_CLEAR, stateFlags), 0);
+        DefWindowProcW(g_hwnd, WM_UPDATEUISTATE, MAKEWPARAM(UIS_SET, state), 0);
+        assert(queryState() == state);
+    };
+    HMENU menu = CreatePopupMenu();
+    assert(menu);
+    assert(AppendMenuW(menu, MF_STRING, 1, L"&Regression test"));
+
+    for (int iteration = 0; iteration < 3; ++iteration) {
+        for (UINT focusState : {0u, static_cast<UINT>(UISF_HIDEFOCUS)}) {
+            seedState(focusState | UISF_HIDEACCEL);
+            SendMessageW(g_hwnd, WM_INITMENUPOPUP, reinterpret_cast<WPARAM>(menu), 0);
+            assert(queryState() == focusState);
+            // Reinitializing an already-visible menu must also be harmless.
+            SendMessageW(g_hwnd, WM_INITMENUPOPUP, reinterpret_cast<WPARAM>(menu), 0);
+            assert(queryState() == focusState);
+
+            SendMessageW(g_hwnd, WM_UPDATEUISTATE, MAKEWPARAM(UIS_SET, UISF_HIDEACCEL), 0);
+            assert(queryState() == focusState);
+            SendMessageW(g_hwnd, WM_UPDATEUISTATE,
+                MAKEWPARAM(UIS_SET, UISF_HIDEACCEL | UISF_HIDEFOCUS), 0);
+            assert(queryState() == UISF_HIDEFOCUS);
+            SendMessageW(g_hwnd, WM_UPDATEUISTATE, MAKEWPARAM(UIS_CLEAR, UISF_HIDEFOCUS), 0);
+            assert(queryState() == 0);
+            SendMessageW(g_hwnd, WM_UPDATEUISTATE, MAKEWPARAM(UIS_SET, UISF_HIDEFOCUS), 0);
+            assert(queryState() == UISF_HIDEFOCUS);
+            SendMessageW(g_hwnd, WM_UPDATEUISTATE,
+                MAKEWPARAM(UIS_CLEAR, UISF_HIDEACCEL | UISF_HIDEFOCUS), 0);
+            assert(queryState() == 0);
+        }
+    }
+
+    assert(DestroyMenu(menu));
+    seedState(savedState);
+    puts("PASS: menu initialization and repeated UI-state transitions keep accelerators visible and preserve focus flags.");
+}
+
 void testAboutVersion() {
     wchar_t path[32768]{};
     const DWORD length = GetModuleFileNameW(nullptr, path, ARRAYSIZE(path));
@@ -421,6 +466,7 @@ int main() {
     g_hwnd=CreateWindowExW(WS_EX_TOOLWINDOW|WS_EX_NOACTIVATE,cls.lpszClassName,L"Hover test",WS_POPUP,
         -30000,-30000,ISLAND_WIDTH,COMPACT_HEIGHT,nullptr,nullptr,cls.hInstance,nullptr);
     assert(g_hwnd);
+    testMenuUiState();
     testAboutVersion();
     g_snapshot.cpu = 100; g_snapshot.gpu = 100; g_snapshot.temperature = 125;
     g_snapshot.tjMax = 125; g_snapshot.distanceToTjMax = 0;

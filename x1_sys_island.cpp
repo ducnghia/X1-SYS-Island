@@ -823,6 +823,15 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         if (LOWORD(wp) == 5) { showAbout(); return 0; }
         break;
 
+    case WM_UPDATEUISTATE:
+        // Mouse input can hide accelerators again after the menu-opening request.
+        // Keep menu mnemonics visible without changing focus-cue preferences.
+        DefWindowProcW(hwnd, msg, wp, lp);
+        return DefWindowProcW(hwnd, WM_UPDATEUISTATE,
+            MAKEWPARAM(UIS_CLEAR, UISF_HIDEACCEL), 0);
+    case WM_INITMENUPOPUP:
+        SendMessageW(hwnd, WM_UPDATEUISTATE, MAKEWPARAM(UIS_CLEAR, UISF_HIDEACCEL), 0);
+        return 0;
     case WM_ERASEBKGND: return 1;
     case WM_SIZE:
     case WM_DISPLAYCHANGE:
