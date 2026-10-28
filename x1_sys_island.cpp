@@ -374,7 +374,11 @@ COLORREF animatedBorderColor(LoadLevel level, ULONGLONG now) {
 COLORREF cpuLabelColor(double load, ULONGLONG now) {
     if (load < 0) return RGB(110, 110, 116);
     const auto level = levelForPercent(static_cast<unsigned>(std::lround(std::clamp(load, 0.0, 100.0))));
-    if (level == LoadLevel::Normal) return RGB(0, 128, 255);
+    if (level == LoadLevel::Normal) {
+        const double phase = 6.283185307179586 * (static_cast<double>(now % 2400) / 2400.0);
+        const double breath = 0.65 + 0.35 * (std::sin(phase + 0.55) + 1.0) * 0.5;
+        return RGB(0, channel(128 * breath), channel(255 * breath));
+    }
     return animatedBorderColor(level, now);
 }
 
@@ -417,7 +421,7 @@ void positionLeft(HWND hwnd) {
     MONITORINFO info{sizeof(info)};
     GetMonitorInfoW(MonitorFromPoint(POINT{0,0}, MONITOR_DEFAULTTOPRIMARY), &info);
     RECT own{}; GetWindowRect(hwnd, &own);
-    int x = info.rcWork.left + 18, y = info.rcWork.top + 36;
+    int x = info.rcWork.left + 36, y = info.rcWork.top + 36;
     RECT target{x, y, x + own.right - own.left, y + own.bottom - own.top};
     HWND ai = FindWindowW(L"X1AIIslandClass", L"X1 AI Island");
     RECT other{}, intersection{};
@@ -493,7 +497,7 @@ void invalidateBorder(HWND hwnd) {
 }
 void invalidateAnimation(HWND hwnd) {
     invalidateBorder(hwnd);
-    if (g_cpuLoad >= 49.5) InvalidateRect(hwnd, &COMPACT_CELLS[0].label, FALSE);
+    InvalidateRect(hwnd, &COMPACT_CELLS[0].label, FALSE);
 }
 void invalidateDisplayChanges(const std::array<std::wstring, 4>& compact,
     const std::array<std::wstring, 9>& expanded, double cpu, LoadLevel level) {
@@ -578,13 +582,24 @@ void render(HDC dc, const RECT& rc, HRGN damage = nullptr) {
     bool borderVisible = false;
     for (const auto& rect : borderRects(rc)) borderVisible = borderVisible || RectVisible(dc, &rect);
     if (borderVisible) {
-    HGDIOBJ oldPen = SelectObject(dc, GetStockObject(DC_PEN));
-    COLORREF oldPenColor = SetDCPenColor(dc, animatedBorderColor(g_loadLevel, now));
-    HGDIOBJ oldBrush = SelectObject(dc, GetStockObject(NULL_BRUSH));
-    RoundRect(dc, 1, 1, rc.right - 1, rc.bottom - 1, 24, 24);
-    SelectObject(dc, oldBrush);
-    SelectObject(dc, oldPen);
-    SetDCPenColor(dc, oldPenColor);
+        HGDIOBJ oldPen = SelectObject(dc, GetStockObject(DC_PEN));
+        const COLORREF oldPenColor = GetDCPenColor(dc);
+        HGDIOBJ oldBrush = SelectObject(dc, GetStockObject(NULL_BRUSH));
+        const COLORREF color = animatedBorderColor(g_loadLevel, now);
+        constexpr double intensity[] = {1.18, 0.46, 0.24, 0.11, 0.045, 0.015};
+        for (int layer = 5; layer >= 0; --layer) {
+            const auto blend = [&](int fg, int bg) {
+                return channel(bg + (fg - bg) * intensity[layer]);
+            };
+            SetDCPenColor(dc, RGB(blend(GetRValue(color), 18),
+                blend(GetGValue(color), 18), blend(GetBValue(color), 20)));
+            const int inset = 1 + layer;
+            RoundRect(dc, inset, inset, rc.right - inset, rc.bottom - inset,
+                24 - 2 * layer, 24 - 2 * layer);
+        }
+        SelectObject(dc, oldBrush);
+        SelectObject(dc, oldPen);
+        SetDCPenColor(dc, oldPenColor);
     }
 
     SetBkMode(dc, TRANSPARENT);
@@ -597,6 +612,34 @@ void render(HDC dc, const RECT& rc, HRGN damage = nullptr) {
             alignment | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS | DT_NOPREFIX);
     };
     SelectObject(dc, g_metricsFont);
+    const RECT cpuCell = COMPACT_CELLS[0].label;
+    if (g_cpuLoad >= 0 && RectVisible(dc, &cpuCell)) {
+        const int glowState = SaveDC(dc);
+        if (glowState) {
+            // Confine the bloom to the label's existing damage cell so it cannot
+            // spill into the CPU percentage or leave trails on partial repaints.
+            IntersectClipRect(dc, cpuCell.left, cpuCell.top, cpuCell.right, cpuCell.bottom);
+            const COLORREF color = cpuLabelColor(g_cpuLoad, now);
+            for (int radius = 2; radius >= 1; --radius) {
+                const double strength = radius == 2 ? 0.10 : 0.28;
+                const auto blend = [&](int fg, int bg) {
+                    return channel(bg + (fg - bg) * strength);
+                };
+                SetTextColor(dc, RGB(blend(GetRValue(color), 18),
+                    blend(GetGValue(color), 18), blend(GetBValue(color), 20)));
+                for (int y = -radius; y <= radius; ++y) {
+                    for (int x = -radius; x <= radius; ++x) {
+                        if (std::max(std::abs(x), std::abs(y)) != radius) continue;
+                        RECT halo = cpuCell;
+                        OffsetRect(&halo, x, y);
+                        DrawTextW(dc, COMPACT_LABELS[0].c_str(), -1, &halo,
+                            DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS | DT_NOPREFIX);
+                    }
+                }
+            }
+            RestoreDC(dc, glowState);
+        }
+    }
     for (size_t i = 0; i < COMPACT_CELLS.size(); ++i) {
         text(COMPACT_LABELS[i], COMPACT_CELLS[i].label, i == 0 ? cpuLabelColor(g_cpuLoad, now) : TEXT_COLOR);
         text(g_compactParts[i], COMPACT_CELLS[i].value, TEXT_COLOR);
