@@ -417,7 +417,7 @@ void refreshDisplayCache() {
     };
     invalidateDisplayChanges(oldCompact, oldExpanded, oldCpu, oldLevel);
 }
-void positionLeft(HWND hwnd) {
+void positionRight(HWND hwnd) {
     MONITORINFO info{sizeof(info)};
     GetMonitorInfoW(MonitorFromPoint(POINT{0,0}, MONITOR_DEFAULTTOPRIMARY), &info);
     RECT own{}; GetWindowRect(hwnd, &own);
@@ -683,7 +683,7 @@ void showContextMenu(HWND hwnd, POINT p, UINT alignFlags = 0) {
     cancelHover(hwnd);
     HMENU m = CreatePopupMenu();
     AppendMenuW(m, MF_STRING, 1, L"&Expand / Collapse");
-    AppendMenuW(m, MF_STRING, 6, L"&Reset to left corner");
+    AppendMenuW(m, MF_STRING, 6, L"&Reset to right corner");
     std::wstring hideLabel = L"&Hide Island\t";
     if (g_hotkeyChoice >= 0 && g_hotkeyChoice < static_cast<int>(ARRAYSIZE(HOTKEYS))) {
         hideLabel += HOTKEYS[g_hotkeyChoice].label;
@@ -713,7 +713,7 @@ void showContextMenu(HWND hwnd, POINT p, UINT alignFlags = 0) {
     DestroyMenu(m);
 
     if (cmd == 1) { g_expanded = !g_expanded; setWindowSize(); }
-    if (cmd == 6) positionLeft(hwnd);
+    if (cmd == 6) positionRight(hwnd);
     if (cmd == 3) toggleIsland(hwnd);
     if (cmd == 4) {
         g_autoHideOnHover = !g_autoHideOnHover;
@@ -1026,7 +1026,7 @@ int WINAPI wWinMain(HINSTANCE h, HINSTANCE, LPWSTR, int) {
     }
     SetLayeredWindowAttributes(g_hwnd, 0, ISLAND_OPACITY, LWA_ALPHA);
     setWindowSize();
-    positionLeft(g_hwnd);
+    positionRight(g_hwnd);
     ShowWindow(g_hwnd, SW_SHOWNOACTIVATE);
     ensureTopmostVisible(g_hwnd);
     startAnimation(g_hwnd);

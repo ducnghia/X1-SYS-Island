@@ -32,6 +32,8 @@ Right-click to change the view, reset the position, hide the island, enable or d
 
 Keep `IntelMSR.bin` beside `X1-SYS-Island.exe`. Start the executable and approve Administrator access so PawnIO can read the CPU sensor. HWiNFO, LibreHardwareMonitor, and a web server are not required.
 
+If CPU Package and TjMax show `N/A`, run `tests\test.bat --require-temperature` from an Administrator terminal to see the sensor error. An access-denied result in a non-elevated terminal does not establish a sensor failure. For a validated reinstall, build with `build.bat build\X1-SYS-Island-fixed.exe`, then run `powershell -ExecutionPolicy Bypass -File tests\install-sensor-repair.ps1` as Administrator. The script requires live CPU Package/TjMax readings before replacing the installed executable, retains a backup, verifies the copied executable hash, and logs to `build/sensor-repair-install.log`.
+
 - `Ctrl+Shift+S`: show or hide the island (default shortcut).
 - `Ctrl+Shift+D`: the alternate shortcut exposed by the context menu.
 - `Ctrl+Alt+D`: open the context menu from the center of the island.
