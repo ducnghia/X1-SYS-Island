@@ -421,17 +421,19 @@ void positionLeft(HWND hwnd) {
     MONITORINFO info{sizeof(info)};
     GetMonitorInfoW(MonitorFromPoint(POINT{0,0}, MONITOR_DEFAULTTOPRIMARY), &info);
     RECT own{}; GetWindowRect(hwnd, &own);
-    int x = info.rcWork.left + 36, y = info.rcWork.top + 36;
+    int x = info.rcWork.right - (own.right - own.left) - 36,
+        y = info.rcWork.top + 36;
     RECT target{x, y, x + own.right - own.left, y + own.bottom - own.top};
     HWND ai = FindWindowW(L"X1AIIslandClass", L"X1 AI Island");
     RECT other{}, intersection{};
     if (ai && GetWindowRect(ai, &other) && IntersectRect(&intersection, &target, &other))
-        y = other.bottom + 16;
+        y = std::max<int>(y, info.rcWork.top);
     // Also reserve the centered AI island's default expanded footprint when it is not running.
-    RECT reserved{info.rcWork.left + (info.rcWork.right-info.rcWork.left-560)/2, info.rcWork.top+18,
+    RECT reserved{info.rcWork.left + (info.rcWork.right-info.rcWork.left-560)/2,
+        info.rcWork.top+18,
         info.rcWork.left + (info.rcWork.right-info.rcWork.left+560)/2, info.rcWork.top+160};
     if (IntersectRect(&intersection, &target, &reserved)) y = std::max<int>(y, reserved.bottom + 16);
-    y = std::max<int>(info.rcWork.top, std::min<int>(y, info.rcWork.bottom - (own.bottom-own.top)));
+    y = std::max<int>(info.rcWork.top, std::min<int>(y, info.rcWork.bottom - (own.bottom - own.top)));
     SetWindowPos(hwnd, HWND_TOPMOST, x, y, 0, 0, SWP_NOSIZE | SWP_NOACTIVATE);
 }
 void setWindowSize() {
