@@ -12,6 +12,17 @@ struct CpuPackageTemperature {
     int distanceToTjMax = -1;
 };
 
+// Both MSRs are package-scoped, so any permitted processor works. Prefer the
+// one already running this thread: pinning to a fixed CPU (often a P-core)
+// would force a migration and wake that core every sample.
+inline KAFFINITY pinnedProcessorMask(const GROUP_AFFINITY& allowed, const PROCESSOR_NUMBER& running) {
+    if (running.Group == allowed.Group && running.Number < sizeof(KAFFINITY) * 8) {
+        const KAFFINITY bit = static_cast<KAFFINITY>(1) << running.Number;
+        if (allowed.Mask & bit) return bit;
+    }
+    return allowed.Mask & (~allowed.Mask + 1); // First permitted processor in the group.
+}
+
 inline CpuPackageTemperature decodePackageTemperature(ULONGLONG target, ULONGLONG thermal) {
     // Intel SDM: IA32_TEMPERATURE_TARGET[23:16] minus digital readout [22:16].
     if (!(thermal & (1ULL << 31))) return {};
@@ -107,7 +118,9 @@ public:
         if (!GetThreadGroupAffinity(GetCurrentThread(), &current) || !current.Mask) {
             source = L"CPU temperature: processor affinity unavailable"; return {};
         }
-        current.Mask &= (~current.Mask + 1); // First permitted processor in the current group.
+        PROCESSOR_NUMBER running{};
+        GetCurrentProcessorNumberEx(&running);
+        current.Mask = pinnedProcessorMask(current, running);
         if (!SetThreadGroupAffinity(GetCurrentThread(), &current, &previous)) {
             source = L"CPU temperature: cannot select processor"; return {};
         }

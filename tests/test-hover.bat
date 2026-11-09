@@ -1,8 +1,8 @@
 @echo off
 setlocal
 cd /d "%~dp0.."
-where cl >nul 2>nul
-if errorlevel 1 call "%ProgramFiles(x86)%\Microsoft Visual Studio\2022\BuildTools\VC\Auxiliary\Build\vcvars64.bat"
+call tools\vsenv.bat
+if errorlevel 1 exit /b 1
 if not exist build mkdir build
 rc /nologo /fo build\x1_sys_island.res x1_sys_island.rc
 if errorlevel 1 exit /b 1

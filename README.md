@@ -1,4 +1,4 @@
-# X1 SYS Island v0.8.5
+# X1 SYS Island v0.8.6
 
 X1 SYS Island is a Windows x64 Win32/GDI overlay for Intel CPU load, system RAM, Intel iGPU load, CPU Package temperature, and read-only fan telemetry. Its layout is 520x46 px collapsed and 520x128 px expanded matching X1 AI Island width, with value-only RAM and C-Pkg compact cells to save space.
 
@@ -71,18 +71,30 @@ The collapsed CPU label follows the same load-based color logic as the RTX 3080 
 - **CPU Package/TjMax:** MSR `0x1A2` provides the validated TjMax value and `0x1B1` provides the digital `Distance to TjMax` readout. The app calculates CPU Package as `TjMax - Distance to TjMax` and displays `<package>°C/<TjMax>°C` without a label when collapsed. No HWiNFO, LibreHardwareMonitor, or web service is used.
 - **Fans:** read-only `Global\\X1FanTelemetryV1` version 2 mapping produced by X1FanService. The mapping is opened and mapped with read access only; sequence, version, and data age (under five seconds) are validated. Missing or stale data displays `N/A`.
 
+Sampling and animation pause while the island is hidden, the system is suspended, the display is off, or the session is locked. Background sampling runs at low priority with Windows EcoQoS where supported.
+
 SYS does not install, start, stop, or control services or fans. Fan mode changes made by AI Island are reflected automatically. Missing data or insufficient permission is shown as `N/A`.
 
 ## Build and test
 
-Requirements: Visual Studio 2022 C++ Build Tools and the Windows SDK. `build.bat` writes the executable to the project root and intermediate files to `build/`. To build to another path, pass it as the first argument, for example `build.bat build\\X1-SYS-Island.exe`.
+Requirements: Visual Studio 2022 (any edition, or Build Tools) with the C++ workload and the Windows SDK. `tools\\vsenv.bat` locates the compiler through `vswhere`. `build.bat` writes the executable to the project root and intermediate files to `build/`. To build to another path, pass it as the first argument, for example `build.bat build\\X1-SYS-Island.exe`.
 
-Run `tests\\test.bat` for telemetry, fan mapping, and sensor conversion checks. `tests\\test.bat --require-temperature` requires an elevated Command Prompt or PowerShell. Run `tests\\test-hover.bat` for layout, border thresholds, hover timers, dragging, menu handling, and manual hide/show behavior. These tests use deterministic preview data where hardware access is not available.
+Run `tests\\run-all.bat` for every non-interactive test, or the individual scripts:
+
+- `tests\\test.bat`: telemetry, fan mapping, and sensor conversion checks. `tests\\test.bat --require-temperature` (also accepted by `run-all.bat`) requires an elevated Command Prompt or PowerShell.
+- `tests\\test-hover.bat`: layout, rendering equivalence, border thresholds, hover timers, dragging, menu handling, manual hide/show, and suspend/display-off/lock behavior.
+- `tests\\test-sensor-optimization.bat`: deterministic sensor retry, affinity, and GPU aggregation checks.
+- `tests\\perf-bench.bat`: paint and telemetry microbenchmark for before/after comparisons; see `docs/optimization-review.md`.
+
+These tests use deterministic preview data where hardware access is not available. `tests\\install-release.ps1` validates `build/X1-SYS-Island-optimized.exe` and replaces the running installed copy with a verified backup.
 
 ## Project layout
 
 - `x1_sys_island.cpp`: window, UI, About dialog, shortcuts, and hover behavior.
+- `island_style.h`: load levels and animated border/CPU-label colors.
+- `settings.h`: hotkey options and persisted per-user settings.
 - `telemetry.h`, `cpu_temperature.h`, `fan_reader.h`: sensor and read-only fan readers.
+- `tools/`: build environment helper.
 - `assets/`: source images and embedded bitmap assets.
 - `licenses/`: licenses and required module source.
 - `tests/`: verification programs; not compiled into the application.
@@ -90,7 +102,17 @@ Run `tests\\test.bat` for telemetry, fan mapping, and sensor conversion checks. 
 
 ## Packaging
 
-`package.ps1` builds an optimized executable and creates `dist/X1-SYS-Island-v0.8.5.zip` containing the executable, `IntelMSR.bin`, this README, third-party notices, and required licenses.
+`package.ps1` builds an optimized executable and creates `dist/X1-SYS-Island-v0.8.6.zip` containing the executable, `IntelMSR.bin`, this README, third-party notices, and required licenses.
+
+## v0.8.6 changes
+
+- Pauses sampling and animation while the display is off or the session is locked, as during suspension; user input recovers a missed resume notification.
+- Runs background sampling with Windows EcoQoS, coalesces animation/watchdog timers, and reads the CPU sensor on the current processor instead of forcing a move to the first one.
+- Draws the CPU-label halo about 3x faster with pixel-identical output, and repaints two border pixels that partial repaints previously left stale.
+- Speeds up GPU counter matching and reuses the PDH buffer; the UI no longer copies diagnostic strings.
+- Stacks below a running AI Island when they would overlap on reset.
+- Adds `tests\\run-all.bat`, `tests\\perf-bench.bat`, a version-aware `tests\\install-release.ps1`, and `vswhere`-based toolchain discovery. See `docs/optimization-review.md` for measurements.
+- About and executable metadata report v0.8.6.
 
 ## v0.8.5 changes
 

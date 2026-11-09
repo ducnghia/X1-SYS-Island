@@ -1,13 +1,25 @@
-param([switch]$SkipTests)
+# Validates build/X1-SYS-Island-optimized.exe, then replaces the running
+# installed executable with hash-verified backup and automatic rollback.
+# The expected version defaults to the one defined in x1_sys_island.rc.
+param([switch]$SkipTests, [string]$ExpectedVersion)
 $ErrorActionPreference = 'Stop'
 $root = Split-Path $PSScriptRoot -Parent
+if (-not $ExpectedVersion) {
+    $rc = Get-Content -LiteralPath (Join-Path $root 'x1_sys_island.rc') -Raw
+    $parts = foreach ($name in 'MAJOR', 'MINOR', 'PATCH', 'BUILD') {
+        if ($rc -notmatch "#define APP_VERSION_$name (\d+)") { throw "APP_VERSION_$name not found in x1_sys_island.rc" }
+        $Matches[1]
+    }
+    $ExpectedVersion = $parts -join '.'
+}
+$logName = 'v' + ($ExpectedVersion -replace '\.', '') + '-install.log'
 New-Item -ItemType Directory -Force -Path (Join-Path $root 'build') | Out-Null
-Start-Transcript -Path (Join-Path $root 'build/v083-install.log') -Force
+Start-Transcript -Path (Join-Path $root "build/$logName") -Force
 try {
     Add-Type @'
 using System;
 using System.Runtime.InteropServices;
-public class SysLabelInstall {
+public class SysReleaseInstall {
  [DllImport("user32.dll", CharSet=CharSet.Unicode)] public static extern IntPtr FindWindow(string c,string t);
  [DllImport("user32.dll")] public static extern bool PostMessage(IntPtr h,uint m,IntPtr w,IntPtr l);
  [DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(IntPtr h,out uint p);
@@ -15,7 +27,7 @@ public class SysLabelInstall {
 '@
     $source = Join-Path $root 'build/X1-SYS-Island-optimized.exe'
     if (-not (Test-Path $source)) { throw 'Built executable not found' }
-    if ((Get-Item $source).VersionInfo.FileVersion -ne '0.8.3.0') { throw 'Expected version 0.8.3.0' }
+    if ((Get-Item $source).VersionInfo.FileVersion -ne $ExpectedVersion) { throw "Expected version $ExpectedVersion" }
     $sourceHash = (Get-FileHash -LiteralPath $source -Algorithm SHA256).Hash
     if (-not $SkipTests) {
         foreach ($test in @('test-sensor-optimization.bat', 'test-hover.bat', 'test.bat')) {
@@ -23,12 +35,12 @@ public class SysLabelInstall {
             if ($LASTEXITCODE -ne 0) { throw "Validation failed: $test" }
         }
     } else {
-        Write-Output 'Tests skipped at user request; install integrity checks remain enabled.'
+        Write-Output 'Tests skipped; install integrity checks remain enabled.'
     }
-    $hwnd = [SysLabelInstall]::FindWindow('X1SYSIslandClass','X1 SYS Island')
+    $hwnd = [SysReleaseInstall]::FindWindow('X1SYSIslandClass','X1 SYS Island')
     if ($hwnd -eq [IntPtr]::Zero) { throw 'Running SYS Island window not found; no files changed' }
     [uint32]$islandPid = 0
-    [SysLabelInstall]::GetWindowThreadProcessId($hwnd,[ref]$islandPid) | Out-Null
+    [SysReleaseInstall]::GetWindowThreadProcessId($hwnd,[ref]$islandPid) | Out-Null
     $process = Get-Process -Id $islandPid
     $target = $process.MainModule.FileName
     if (-not $target -or [IO.Path]::GetFileName($target) -ne 'X1-SYS-Island.exe') { throw 'Cannot identify installed executable safely' }
@@ -38,7 +50,7 @@ public class SysLabelInstall {
     if ((Get-FileHash -LiteralPath $backup -Algorithm SHA256).Hash -ne $targetHash) { throw 'Backup hash mismatch; executable unchanged' }
     if ((Get-FileHash -LiteralPath $source -Algorithm SHA256).Hash -ne $sourceHash) { throw 'Source changed during validation; executable unchanged' }
     Write-Output "Backup: $backup"
-    if (-not [SysLabelInstall]::PostMessage($hwnd,0x10,[IntPtr]::Zero,[IntPtr]::Zero)) { throw 'Cannot request graceful shutdown' }
+    if (-not [SysReleaseInstall]::PostMessage($hwnd,0x10,[IntPtr]::Zero,[IntPtr]::Zero)) { throw 'Cannot request graceful shutdown' }
     if (-not $process.WaitForExit(15000)) { throw 'Application did not close; executable unchanged' }
     $launched = $null
     try {
@@ -48,16 +60,16 @@ public class SysLabelInstall {
         $verified = $false
         for ($i = 0; $i -lt 20; $i++) {
             Start-Sleep -Milliseconds 500
-            $window = [SysLabelInstall]::FindWindow('X1SYSIslandClass','X1 SYS Island')
+            $window = [SysReleaseInstall]::FindWindow('X1SYSIslandClass','X1 SYS Island')
             [uint32]$windowPid = 0
             if ($window -ne [IntPtr]::Zero) {
-                [SysLabelInstall]::GetWindowThreadProcessId($window,[ref]$windowPid) | Out-Null
+                [SysReleaseInstall]::GetWindowThreadProcessId($window,[ref]$windowPid) | Out-Null
                 if ($windowPid -eq $launched.Id) { $verified = $true; break }
             }
             if ($launched.HasExited) { break }
         }
         if (-not $verified) { throw 'New application window not verified; backup retained' }
-        Write-Output "PASS: Installed and running PID=$($launched.Id) Path=$target"
+        Write-Output "PASS: Installed $ExpectedVersion and running PID=$($launched.Id) Path=$target"
     } catch {
         if (-not $launched -or $launched.HasExited) {
             Copy-Item -LiteralPath $backup -Destination $target -Force

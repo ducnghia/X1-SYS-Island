@@ -24,6 +24,10 @@ int opens = 0, loads = 0, reads = 0, closes = 0, affinityCalls = 0;
 int failRead = 0;
 bool shortReply = false, failRestore = false, failSelect = false, failGet = false, failLoad = false;
 GROUP_AFFINITY original{0xacu, 2, {0, 0, 0}}, affinity = original;
+// Default: running outside the permitted group, so the first permitted CPU is used.
+PROCESSOR_NUMBER running{0, 1, 0};
+KAFFINITY expectedPin = 4;
+VOID WINAPI processor(PPROCESSOR_NUMBER value) { *value = running; }
 ULONGLONG WINAPI tick() { return now; }
 HANDLE WINAPI create(LPCWSTR path, DWORD, DWORD, LPSECURITY_ATTRIBUTES, DWORD, DWORD, HANDLE) {
     if (wcsstr(path, L"PawnIO")) { ++opens; return reinterpret_cast<HANDLE>(1); }
@@ -57,7 +61,7 @@ BOOL WINAPI getAffinity(HANDLE, PGROUP_AFFINITY value) {
 BOOL WINAPI setAffinity(HANDLE, const GROUP_AFFINITY* value, PGROUP_AFFINITY previous) {
     ++affinityCalls;
     if ((previous && failSelect) || (!previous && failRestore)) { SetLastError(ERROR_ACCESS_DENIED); return FALSE; }
-    if (previous) { *previous = affinity; assert(value->Mask == 4 && value->Group == 2); }
+    if (previous) { *previous = affinity; assert(value->Mask == expectedPin && value->Group == 2); }
     else assert(value->Mask == original.Mask && value->Group == original.Group);
     affinity = *value; return TRUE;
 }
@@ -80,6 +84,7 @@ void cpuidex(int* registers, int, int) { memset(registers, 0, 4 * sizeof(int)); 
 #define DeviceIoControl fake::ioctl
 #define GetThreadGroupAffinity fake::getAffinity
 #define SetThreadGroupAffinity fake::setAffinity
+#define GetCurrentProcessorNumberEx fake::processor
 #define __cpuid fake::cpuid
 #define __cpuidex fake::cpuidex
 #include "../cpu_temperature.h"
@@ -92,6 +97,7 @@ void cpuidex(int* registers, int, int) { memset(registers, 0, 4 * sizeof(int)); 
 #undef DeviceIoControl
 #undef GetThreadGroupAffinity
 #undef SetThreadGroupAffinity
+#undef GetCurrentProcessorNumberEx
 #undef __cpuid
 #undef __cpuidex
 #include "../telemetry.h"
@@ -161,6 +167,17 @@ static void testSensors() {
     ++now;
     assert(sensor.sample(source).package == 73);
 
+    // Stay on the current processor when it is permitted; otherwise fall back.
+    running = {2, 5, 0};
+    expectedPin = 0x20;
+    assert(sensor.sample(source).package == 73 && affinity.Mask == original.Mask);
+    running = {2, 4, 0}; // Not in 0xac.
+    expectedPin = 4;
+    assert(sensor.sample(source).package == 73);
+    running = {0, 5, 0}; // Other group.
+    assert(sensor.sample(source).package == 73);
+    assert(pinnedProcessorMask(GROUP_AFFINITY{0x1, 0, {}}, PROCESSOR_NUMBER{0, 63, 0}) == 1);
+
     CpuTemperature loading;
     failLoad = true;
     assert(loading.sample(source).package == -1);
@@ -205,6 +222,10 @@ static void testGpu() {
     assert(allocations == before && engines == reference);
     add(L"pid_7_luid_0x00000000_0x00000001_phys_0_eng_0_engtype_3d", 70);
     assert(busiestEngine(engines) == 100);
+    // A partial LUID prefix earlier in the name must not hide a later full match.
+    add(L"luid_0x00000000_pid_8_luid_0x00000000_0x00000002_phys_0_eng_1_engtype_copy", 5);
+    assert(findAsciiInsensitive(L"abc", L"abcd") == nullptr);
+    assert(findAsciiInsensitive(L"xABc", L"abc") != nullptr);
 }
 
 int main() {

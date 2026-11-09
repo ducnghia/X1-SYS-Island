@@ -21,11 +21,16 @@
 
 using Microsoft::WRL::ComPtr;
 
-struct Stats {
+// Numeric readings shown by the UI. Copying a Readings out of a Stats
+// deliberately drops the diagnostic strings, so the UI never copies them.
+struct Readings {
     double cpu = -1, gpu = -1, temperature = -1;
     int tjMax = -1, distanceToTjMax = -1;
     FanSnapshot fans;
     unsigned long long total = 0, used = 0;
+};
+
+struct Stats : Readings {
     std::wstring gpuName = L"Intel integrated GPU not detected";
     std::wstring tempSource = L"Reading CPU Package directly from Intel sensor...";
 };
@@ -39,19 +44,35 @@ inline double busiestEngine(const std::map<std::wstring, double>& engines) {
     return (std::clamp)(result, 0.0, 100.0);
 }
 
+// PDH instance names are ASCII, so ASCII folding matches towlower in the C
+// locale without a CRT call per character across ~1000 instances per sample.
+inline wchar_t asciiLower(wchar_t c) {
+    return c >= L'A' && c <= L'Z' ? static_cast<wchar_t>(c + (L'a' - L'A')) : c;
+}
+
+// Case-insensitive search; lowerPattern must already be lowercase.
+inline const wchar_t* findAsciiInsensitive(const wchar_t* text, std::wstring_view lowerPattern) {
+    if (lowerPattern.empty()) return text;
+    for (; *text; ++text) {
+        if (asciiLower(*text) != lowerPattern[0]) continue;
+        size_t i = 1;
+        while (i < lowerPattern.size() && text[i] && asciiLower(text[i]) == lowerPattern[i]) ++i;
+        if (i == lowerPattern.size()) return text;
+    }
+    return nullptr;
+}
+
+// intelLuids must be lowercase, as produced by Telemetry.
 inline void accumulateGpuEngine(std::map<std::wstring, double>& engines,
     const PDH_FMT_COUNTERVALUE_ITEM_W& item, const std::vector<std::wstring>& intelLuids) {
     if (!validCounter(item.FmtValue.CStatus) || !item.szName) return;
-    const std::wstring_view name(item.szName);
     for (const auto& luid : intelLuids) {
-        const auto start = std::search(name.begin(), name.end(), luid.begin(), luid.end(),
-            [](wchar_t a, wchar_t b) { return std::towlower(a) == std::towlower(b); });
-        if (start == name.end()) continue;
+        const wchar_t* start = findAsciiInsensitive(item.szName, luid);
+        if (!start) continue;
         // Only matching adapters allocate a key. Retain the full physical-engine
         // suffix so processes combine without merging adapters or distinct engines.
-        std::wstring key(start, name.end());
-        std::transform(key.begin(), key.end(), key.begin(),
-            [](wchar_t c) { return static_cast<wchar_t>(std::towlower(c)); });
+        std::wstring key(start);
+        std::transform(key.begin(), key.end(), key.begin(), asciiLower);
         engines[std::move(key)] += (std::max)(0.0, item.FmtValue.doubleValue);
         break;
     }
@@ -66,6 +87,25 @@ class Telemetry {
     bool primed = false;
     std::vector<BYTE> gpuBuffer;
     CpuTemperature cpuTemperature;
+
+    // Try the retained buffer first: the instance set rarely grows, so this
+    // usually skips PDH's separate (and similarly expensive) size query.
+    // If it is too small, fall back to the documented size-then-fetch pattern.
+    const PDH_FMT_COUNTERVALUE_ITEM_W* readGpuArray(DWORD& count) {
+        auto items = [this] { return reinterpret_cast<PDH_FMT_COUNTERVALUE_ITEM_W*>(gpuBuffer.data()); };
+        DWORD bytes = static_cast<DWORD>(gpuBuffer.size());
+        PDH_STATUS status = bytes
+            ? PdhGetFormattedCounterArrayW(gpuCounter, PDH_FMT_DOUBLE, &bytes, &count, items())
+            : PDH_MORE_DATA;
+        if (status == PDH_MORE_DATA) {
+            bytes = 0;
+            if (PdhGetFormattedCounterArrayW(gpuCounter, PDH_FMT_DOUBLE, &bytes, &count, nullptr) != PDH_MORE_DATA)
+                return nullptr;
+            gpuBuffer.resize(bytes);
+            status = PdhGetFormattedCounterArrayW(gpuCounter, PDH_FMT_DOUBLE, &bytes, &count, items());
+        }
+        return status == ERROR_SUCCESS ? items() : nullptr;
+    }
 public:
     Telemetry() {
         ComPtr<IDXGIFactory1> factory;
@@ -111,16 +151,13 @@ public:
                 PDH_FMT_COUNTERVALUE value{};
                 if (cpuCounter && PdhGetFormattedCounterValue(cpuCounter, PDH_FMT_DOUBLE, nullptr, &value) == ERROR_SUCCESS && validCounter(value.CStatus))
                     result.cpu = (std::clamp)(value.doubleValue, 0.0, 100.0);
-                DWORD bytes = 0, count = 0;
-                if (gpuCounter && PdhGetFormattedCounterArrayW(gpuCounter, PDH_FMT_DOUBLE, &bytes, &count, nullptr) == PDH_MORE_DATA) {
-                    gpuBuffer.resize(bytes);
-                    auto items = reinterpret_cast<PDH_FMT_COUNTERVALUE_ITEM_W*>(gpuBuffer.data());
-                    if (PdhGetFormattedCounterArrayW(gpuCounter, PDH_FMT_DOUBLE, &bytes, &count, items) == ERROR_SUCCESS) {
-                        std::map<std::wstring, double> engines;
-                        for (DWORD i = 0; i < count; ++i)
-                            accumulateGpuEngine(engines, items[i], intelLuids);
-                        if (!engines.empty()) result.gpu = busiestEngine(engines);
-                    }
+                DWORD count = 0;
+                const auto* items = gpuCounter ? readGpuArray(count) : nullptr;
+                if (items) {
+                    std::map<std::wstring, double> engines;
+                    for (DWORD i = 0; i < count; ++i)
+                        accumulateGpuEngine(engines, items[i], intelLuids);
+                    if (!engines.empty()) result.gpu = busiestEngine(engines);
                 }
             }
             primed = true;

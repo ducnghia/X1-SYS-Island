@@ -9,9 +9,13 @@
 #include <cstdarg>
 #include <cmath>
 
+#include <wtsapi32.h>
+
 #include "resource.h"
 #include "telemetry.h"
 #include "cpu_identity.h"
+#include "island_style.h"
+#include "settings.h"
 #include <thread>
 #include <mutex>
 #include <atomic>
@@ -19,10 +23,10 @@
 
 #pragma comment(lib, "user32.lib")
 #pragma comment(lib, "gdi32.lib")
-#pragma comment(lib, "advapi32.lib")
+#pragma comment(lib, "wtsapi32.lib")
 
 // Native Win32/GDI overlay; telemetry runs on a separate worker.
-Stats g_snapshot;
+Stats g_snapshot; // Written by the worker under g_statsMutex.
 std::mutex g_statsMutex;
 HANDLE g_stopEvent;
 HANDLE g_policyEvent;
@@ -61,7 +65,12 @@ struct WorkerSchedule {
     }
 };
 bool g_onBattery = false;
+// Reasons nobody can see the island. Any of them releases telemetry and stops
+// animation, exactly like suspension.
 bool g_suspended = false;
+bool g_displayOff = false;
+bool g_sessionLocked = false;
+bool presentationPaused() { return g_suspended || g_displayOff || g_sessionLocked; }
 constexpr UINT WM_STATS_READY = WM_APP + 1;
 std::thread g_worker;
 constexpr int ISLAND_WIDTH = 520;
@@ -106,12 +115,13 @@ bool g_hotkeyRegistered = false;
 bool g_contextHotkeyRegistered = false;
 int g_hotkeyChoice = 0;
 
-const UINT_PTR STATS_TIMER_ID = 1;
 const UINT_PTR HOVER_TIMER_ID = 2;
 const UINT_PTR RESHOW_TIMER_ID = 3;
 const UINT_PTR ANIMATION_TIMER_ID = 4;
 const UINT_PTR TELEMETRY_HEALTH_TIMER_ID = 5;
 const UINT ANIMATION_INTERVAL_MS = 100;
+const UINT BATTERY_ANIMATION_INTERVAL_MS = 1000;
+const UINT TELEMETRY_HEALTH_INTERVAL_MS = 15000;
 const int HOTKEY_ID = 100;
 const int CONTEXT_MENU_HOTKEY_ID = 200;
 const UINT WM_SHOW_EXISTING_ISLAND = WM_USER + 1;
@@ -119,11 +129,14 @@ const wchar_t SINGLE_INSTANCE_MUTEX[] = L"Global\\X1SYSIslandMutex";
 
 const BYTE ISLAND_OPACITY = 230;
 
-
-enum class LoadLevel {
-    Normal,
-    Yellow,
-    Red
+enum MenuCommand : int {
+    MENU_TOGGLE_EXPANDED = 1,
+    MENU_EXIT = 2,
+    MENU_HIDE = 3,
+    MENU_AUTO_HIDE = 4,
+    MENU_ABOUT = 5,
+    MENU_RESET_POSITION = 6,
+    MENU_HOTKEY_FIRST = 100
 };
 
 LoadLevel g_loadLevel = LoadLevel::Normal;
@@ -131,46 +144,6 @@ void ensureExpandedLayout(HDC dc);
 void invalidateDisplayChanges(const std::array<std::wstring, 4>& compact,
     const std::array<std::wstring, 9>& expanded, double cpu, LoadLevel level);
 
-struct HotkeyOption {
-    UINT modifiers;
-    UINT key;
-    const wchar_t* label;
-};
-
-const HotkeyOption HOTKEYS[] = {
-    {MOD_CONTROL | MOD_SHIFT, 'S', L"Ctrl+Shift+S"},
-    {MOD_CONTROL | MOD_SHIFT, 'D', L"Ctrl+Shift+D"}
-};
-const wchar_t* SETTINGS_KEY = L"Software\\X1SYSIsland";
-int loadHotkeyChoice() {
-    DWORD value = 0, size = sizeof(value);
-    if (RegGetValueW(HKEY_CURRENT_USER, SETTINGS_KEY, L"HotkeyV3", RRF_RT_REG_DWORD,
-        nullptr, &value, &size) == ERROR_SUCCESS && value < ARRAYSIZE(HOTKEYS)) return value;
-    return 0;
-}
-void saveHotkeyChoice(int choice) {
-    HKEY key;
-    if (RegCreateKeyExW(HKEY_CURRENT_USER, SETTINGS_KEY, 0, nullptr, 0,
-        KEY_SET_VALUE, nullptr, &key, nullptr) == ERROR_SUCCESS) {
-        RegSetValueExW(key, L"HotkeyV3", 0, REG_DWORD, reinterpret_cast<const BYTE*>(&choice), sizeof(choice));
-        RegCloseKey(key);
-    }
-}
-bool loadAutoHideOnHover() {
-    DWORD value = 1, size = sizeof(value);
-    if (RegGetValueW(HKEY_CURRENT_USER, SETTINGS_KEY, L"AutoHideOnHover", RRF_RT_REG_DWORD,
-        nullptr, &value, &size) == ERROR_SUCCESS) return value != 0;
-    return true;
-}
-void saveAutoHideOnHover(bool enabled) {
-    HKEY key;
-    if (RegCreateKeyExW(HKEY_CURRENT_USER, SETTINGS_KEY, 0, nullptr, 0,
-        KEY_SET_VALUE, nullptr, &key, nullptr) == ERROR_SUCCESS) {
-        DWORD value = enabled ? 1 : 0;
-        RegSetValueExW(key, L"AutoHideOnHover", 0, REG_DWORD, reinterpret_cast<const BYTE*>(&value), sizeof(value));
-        RegCloseKey(key);
-    }
-}
 bool registerToggleHotkey(HWND hwnd, int choice) {
     if (choice < 0 || choice >= ARRAYSIZE(HOTKEYS)) return false;
     const auto& option = HOTKEYS[choice];
@@ -190,7 +163,7 @@ void selectHotkey(HWND hwnd, int choice) {
     }
 }
 void publishSamplingPolicy(bool visible) {
-    const auto mode = g_suspended || g_userHidden ? SamplingMode::Released
+    const auto mode = presentationPaused() || g_userHidden ? SamplingMode::Released
         : visible ? SamplingMode::Active
         : g_hoverHidden ? SamplingMode::Hover : SamplingMode::Released;
     const DWORD interval = g_onBattery ? 3000 : 1000;
@@ -214,8 +187,11 @@ void updateSamplingPolicy(HWND hwnd) {
     publishSamplingPolicy(IsWindowVisible(hwnd) != FALSE);
 }
 void startAnimation(HWND hwnd) {
-    if(IsWindowVisible(hwnd) && !g_userHidden && !g_hoverHidden)
-        SetTimer(hwnd,ANIMATION_TIMER_ID,g_onBattery ? 1000 : ANIMATION_INTERVAL_MS,nullptr);
+    if (!IsWindowVisible(hwnd) || g_userHidden || g_hoverHidden || presentationPaused()) return;
+    // Tolerance lets Windows batch this wakeup with others. Small on AC to
+    // keep the pulse smooth; generous on battery where it only reconciles hover.
+    const UINT interval = g_onBattery ? BATTERY_ANIMATION_INTERVAL_MS : ANIMATION_INTERVAL_MS;
+    SetCoalescableTimer(hwnd, ANIMATION_TIMER_ID, interval, nullptr, g_onBattery ? 250 : 10);
 }
 
 void stopAnimation(HWND hwnd) {
@@ -266,12 +242,6 @@ bool cursorInside(HWND hwnd) {
     POINT p{};
     RECT r{};
     return GetCursorPos(&p) && GetWindowRect(hwnd,&r) && PtInRect(&r,p);
-}
-
-LoadLevel levelForPercent(unsigned value) {
-    if (value >= 80) return LoadLevel::Red;
-    if (value >= 50) return LoadLevel::Yellow;
-    return LoadLevel::Normal;
 }
 
 std::wstring formatText(const wchar_t* format, ...) {
@@ -342,54 +312,12 @@ void showAbout() {
     g_contextOpen=false;
 }
 
-BYTE channel(double value) {
-    return static_cast<BYTE>((std::max)(0.0, (std::min)(255.0, value)));
-}
-
-COLORREF pulseColor(LoadLevel level, double phase) {
-    double rWave = (std::sin)(phase) + 1.0;
-    double gWave = (std::sin)(phase + 0.55) + 1.0;
-    double bWave = (std::sin)(phase + 1.10) + 1.0;
-    rWave *= 0.5; gWave *= 0.5; bWave *= 0.5;
-
-    if (level == LoadLevel::Normal) {
-        // Intel blue-green breathing: hue remains blue-green while brightness rises/falls
-        double breath = 0.45 + 0.55 * gWave;
-        return RGB(channel(1.0), channel(160.0 * breath), channel(230.0 * breath));
-    }
-    if (level == LoadLevel::Yellow) {
-        // Yellow-dominant: red and green breathe with small blue phase offset
-        return RGB(channel(205.0 + 50.0 * rWave), channel(145.0 + 100.0 * gWave), channel(4.0 + 24.0 * bWave));
-    }
-    // Red-biased: strong red with subtle green/blue shifts
-    return RGB(channel(170.0 + 85.0 * rWave), channel(5.0 + 42.0 * gWave), channel(5.0 + 30.0 * bWave));
-}
-
-COLORREF animatedBorderColor(LoadLevel level, ULONGLONG now) {
-    double period = level == LoadLevel::Normal ? 2400.0 : (level == LoadLevel::Yellow ? 1400.0 : 1050.0);
-    double phase = 6.283185307179586 * (static_cast<double>(now % static_cast<ULONGLONG>(period)) / period);
-    return pulseColor(level, phase);
-}
-
-COLORREF cpuLabelColor(double load, ULONGLONG now) {
-    if (load < 0) return RGB(110, 110, 116);
-    const auto level = levelForPercent(static_cast<unsigned>(std::lround(std::clamp(load, 0.0, 100.0))));
-    if (level == LoadLevel::Normal) {
-        const double phase = 6.283185307179586 * (static_cast<double>(now % 2400) / 2400.0);
-        const double breath = 0.65 + 0.35 * (std::sin(phase + 0.55) + 1.0) * 0.5;
-        return RGB(0, channel(128 * breath), channel(255 * breath));
-    }
-    return animatedBorderColor(level, now);
-}
-
 void refreshDisplayCache() {
-    Stats stats;
+    Readings stats;
     {
         std::lock_guard<std::mutex> guard(g_statsMutex);
-        stats = g_snapshot;
+        stats = g_snapshot; // Numeric slice only; the UI never shows the diagnostic strings.
     }
-    const auto oldCompact = g_compactParts;
-    const auto oldExpanded = g_expandedParts;
     const auto oldCpu = g_cpuLoad;
     const auto oldLevel = g_loadLevel;
     g_cpuLoad = stats.cpu;
@@ -397,14 +325,14 @@ void refreshDisplayCache() {
     const unsigned ramPercent = stats.total ? static_cast<unsigned>(100 * stats.used / stats.total) : 0;
     const unsigned cpuPercent = stats.cpu >= 0 ? static_cast<unsigned>(std::lround(stats.cpu)) : 0;
     g_loadLevel = levelForPercent(std::max(cpuPercent, ramPercent));
-    g_compactParts = {
+    std::array<std::wstring, 4> compact{
         stats.cpu >= 0 ? formatText(L"%.0f%%", stats.cpu) : L"N/A",
         stats.total ? formatText(L"%.1f/%.1fG", stats.used/GIB, stats.total/GIB) : L"N/A",
         stats.temperature >= 0 && stats.tjMax >= 0
             ? formatText(L"%.0f\u00B0C/%d\u00B0C", stats.temperature, stats.tjMax) : L"N/A",
         stats.gpu >= 0 ? formatText(L"%.0f%%", stats.gpu) : L"N/A"
     };
-    g_expandedParts = {
+    std::array<std::wstring, 9> expanded{
         stats.cpu >= 0 ? formatText(L"%.0f%%", stats.cpu) : L"N/A",
         stats.temperature >= 0 ? formatText(L"%.0f\u00B0C", stats.temperature) : L"N/A",
         stats.tjMax >= 0 ? formatText(L"%d\u00B0C", stats.tjMax) : L"N/A",
@@ -415,7 +343,10 @@ void refreshDisplayCache() {
         stats.fans.ok ? formatText(L"%lu", stats.fans.fan1) : L"N/A",
         stats.fans.ok ? formatText(L"%lu", stats.fans.fan2) : L"N/A"
     };
-    invalidateDisplayChanges(oldCompact, oldExpanded, oldCpu, oldLevel);
+    // After the swaps the locals hold the previous text for change detection.
+    g_compactParts.swap(compact);
+    g_expandedParts.swap(expanded);
+    invalidateDisplayChanges(compact, expanded, oldCpu, oldLevel);
 }
 void positionRight(HWND hwnd) {
     MONITORINFO info{sizeof(info)};
@@ -426,8 +357,9 @@ void positionRight(HWND hwnd) {
     RECT target{x, y, x + own.right - own.left, y + own.bottom - own.top};
     HWND ai = FindWindowW(L"X1AIIslandClass", L"X1 AI Island");
     RECT other{}, intersection{};
+    // Stack below a running AI island that would overlap, as for its reserved footprint below.
     if (ai && GetWindowRect(ai, &other) && IntersectRect(&intersection, &target, &other))
-        y = std::max<int>(y, info.rcWork.top);
+        y = std::max<int>(y, other.bottom + 16);
     // Also reserve the centered AI island's default expanded footprint when it is not running.
     RECT reserved{info.rcWork.left + (info.rcWork.right-info.rcWork.left-560)/2,
         info.rcWork.top+18,
@@ -439,9 +371,10 @@ void positionRight(HWND hwnd) {
 void setWindowSize() {
     int w = ISLAND_WIDTH;
     int h = g_expanded ? EXPANDED_HEIGHT : COMPACT_HEIGHT;
-    RECT r{}; GetWindowRect(g_hwnd, &r);
-    SetWindowPos(g_hwnd, nullptr, r.left, r.top, w, h, SWP_NOZORDER | SWP_NOACTIVATE);
-    ensureTopmostVisible(g_hwnd);
+    // One SetWindowPos resizes and, when shown, also reasserts topmost order.
+    const bool topmost = IsWindowVisible(g_hwnd) && !g_userHidden && !g_hoverHidden;
+    SetWindowPos(g_hwnd, topmost ? HWND_TOPMOST : nullptr, 0, 0, w, h,
+        SWP_NOMOVE | SWP_NOACTIVATE | (topmost ? 0 : SWP_NOZORDER));
     HRGN region = CreateRoundRectRgn(0, 0, w + 1, h + 1, 24, 24);
     if (!SetWindowRgn(g_hwnd, region, TRUE) && region) DeleteObject(region);
 }
@@ -487,11 +420,47 @@ void ensureExpandedLayout(HDC dc) {
     g_layoutFont = g_smallFont;
 }
 const std::array<std::wstring, 4> COMPACT_LABELS{g_cpuIdentity.compact, L"", L"", L"iGPU"};
+constexpr UINT LABEL_TEXT_FORMAT = DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS | DT_NOPREFIX;
 
-std::array<RECT, 4> borderRects(const RECT& rc) {
+// The CPU-label halo draws the same text 24 times per animation frame.
+// DrawTextW re-runs ellipsis layout for each copy; resolving the displayed
+// string and baseline once per font lets the halo use plain ExtTextOutW.
+struct GlowLabelLayout {
+    HFONT font = nullptr;
+    std::wstring text;
+    int top = 0;
+};
+// Requires the label's font to be selected into dc.
+GlowLabelLayout layoutGlowLabel(HDC dc, const std::wstring& label, const RECT& cell) {
+    // DT_MODIFYSTRING may append up to four characters for the ellipsis.
+    std::wstring text = label;
+    text.append(4, L'\0');
+    RECT bounds = cell;
+    DrawTextW(dc, text.data(), static_cast<int>(label.size()), &bounds,
+        LABEL_TEXT_FORMAT | DT_MODIFYSTRING | DT_CALCRECT);
+    text.resize(wcslen(text.c_str()));
+    TEXTMETRICW metrics{};
+    GetTextMetricsW(dc, &metrics);
+    // DT_VCENTER for a single line centres the font's full cell height.
+    return {static_cast<HFONT>(GetCurrentObject(dc, OBJ_FONT)), std::move(text),
+        static_cast<int>(cell.top + (cell.bottom - cell.top - metrics.tmHeight) / 2)};
+}
+// Pixel-identical to DrawTextW(label, cell offset by dx/dy, LABEL_TEXT_FORMAT).
+void drawGlowCopy(HDC dc, const GlowLabelLayout& layout, const RECT& cell, int dx, int dy) {
+    RECT clip = cell;
+    OffsetRect(&clip, dx, dy);
+    ExtTextOutW(dc, clip.left, layout.top + dy, ETO_CLIPPED, &clip,
+        layout.text.c_str(), static_cast<UINT>(layout.text.size()), nullptr);
+}
+GlowLabelLayout g_cpuGlowLayout;
+
+std::array<RECT, 6> borderRects(const RECT& rc) {
     // Edge strips cover the rounded corners without touching the text/logo.
+    // The innermost glow layer's bottom arcs also reach one pixel beside each
+    // side strip; widening the strips would intersect the logo/expanded cells.
     return {{{0, 0, rc.right, 9}, {0, rc.bottom - 7, rc.right, rc.bottom},
-        {0, 9, 10, rc.bottom - 7}, {rc.right - 10, 9, rc.right, rc.bottom - 7}}};
+        {0, 9, 10, rc.bottom - 7}, {rc.right - 10, 9, rc.right, rc.bottom - 7},
+        {10, rc.bottom - 8, 11, rc.bottom - 7}, {rc.right - 11, rc.bottom - 8, rc.right - 10, rc.bottom - 7}}};
 }
 void invalidateBorder(HWND hwnd) {
     RECT rc{}; GetClientRect(hwnd, &rc);
@@ -610,8 +579,7 @@ void render(HDC dc, const RECT& rc, HRGN damage = nullptr) {
     auto text = [&](const std::wstring& value, RECT cell, COLORREF color, UINT alignment = DT_LEFT) {
         if (value.empty() || !RectVisible(dc, &cell)) return;
         SetTextColor(dc, color);
-        DrawTextW(dc, value.c_str(), -1, &cell,
-            alignment | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS | DT_NOPREFIX);
+        DrawTextW(dc, value.c_str(), -1, &cell, (LABEL_TEXT_FORMAT & ~DT_LEFT) | alignment);
     };
     SelectObject(dc, g_metricsFont);
     const RECT cpuCell = COMPACT_CELLS[0].label;
@@ -621,6 +589,8 @@ void render(HDC dc, const RECT& rc, HRGN damage = nullptr) {
             // Confine the bloom to the label's existing damage cell so it cannot
             // spill into the CPU percentage or leave trails on partial repaints.
             IntersectClipRect(dc, cpuCell.left, cpuCell.top, cpuCell.right, cpuCell.bottom);
+            if (g_cpuGlowLayout.font != g_metricsFont)
+                g_cpuGlowLayout = layoutGlowLabel(dc, COMPACT_LABELS[0], cpuCell);
             const COLORREF color = cpuLabelColor(g_cpuLoad, now);
             for (int radius = 2; radius >= 1; --radius) {
                 const double strength = radius == 2 ? 0.10 : 0.28;
@@ -632,10 +602,7 @@ void render(HDC dc, const RECT& rc, HRGN damage = nullptr) {
                 for (int y = -radius; y <= radius; ++y) {
                     for (int x = -radius; x <= radius; ++x) {
                         if (std::max(std::abs(x), std::abs(y)) != radius) continue;
-                        RECT halo = cpuCell;
-                        OffsetRect(&halo, x, y);
-                        DrawTextW(dc, COMPACT_LABELS[0].c_str(), -1, &halo,
-                            DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS | DT_NOPREFIX);
+                        drawGlowCopy(dc, g_cpuGlowLayout, cpuCell, x, y);
                     }
                 }
             }
@@ -682,28 +649,28 @@ void paint() {
 void showContextMenu(HWND hwnd, POINT p, UINT alignFlags = 0) {
     cancelHover(hwnd);
     HMENU m = CreatePopupMenu();
-    AppendMenuW(m, MF_STRING, 1, L"&Expand / Collapse");
-    AppendMenuW(m, MF_STRING, 6, L"&Reset to right corner");
+    AppendMenuW(m, MF_STRING, MENU_TOGGLE_EXPANDED, L"&Expand / Collapse");
+    AppendMenuW(m, MF_STRING, MENU_RESET_POSITION, L"&Reset to right corner");
     std::wstring hideLabel = L"&Hide Island\t";
     if (g_hotkeyChoice >= 0 && g_hotkeyChoice < static_cast<int>(ARRAYSIZE(HOTKEYS))) {
         hideLabel += HOTKEYS[g_hotkeyChoice].label;
     } else {
         hideLabel += L"N/A";
     }
-    AppendMenuW(m, MF_STRING, 3, hideLabel.c_str());
-    AppendMenuW(m, MF_STRING | (g_autoHideOnHover ? MF_CHECKED : 0), 4, L"&Auto-hide on hover");
+    AppendMenuW(m, MF_STRING, MENU_HIDE, hideLabel.c_str());
+    AppendMenuW(m, MF_STRING | (g_autoHideOnHover ? MF_CHECKED : 0), MENU_AUTO_HIDE, L"&Auto-hide on hover");
     AppendMenuW(m, MF_SEPARATOR, 0, nullptr);
 
     HMENU shortcuts = CreatePopupMenu();
     for (int i = 0; i < static_cast<int>(ARRAYSIZE(HOTKEYS)); ++i) {
         UINT flags = MF_STRING | (i == g_hotkeyChoice ? MF_CHECKED : 0);
-        AppendMenuW(shortcuts, flags, 100 + i, HOTKEYS[i].label);
+        AppendMenuW(shortcuts, flags, MENU_HOTKEY_FIRST + i, HOTKEYS[i].label);
     }
     AppendMenuW(m, MF_POPUP, reinterpret_cast<UINT_PTR>(shortcuts), L"Hide / show &shortcut");
     AppendMenuW(m, MF_SEPARATOR, 0, nullptr);
 
-    AppendMenuW(m, MF_STRING, 5, L"A&bout X1 SYS Island");
-    AppendMenuW(m, MF_STRING, 2, L"E&xit");
+    AppendMenuW(m, MF_STRING, MENU_ABOUT, L"A&bout X1 SYS Island");
+    AppendMenuW(m, MF_STRING, MENU_EXIT, L"E&xit");
 
     SetForegroundWindow(hwnd);
     SendMessageW(hwnd, WM_CHANGEUISTATE, MAKEWPARAM(UIS_CLEAR, UISF_HIDEACCEL), 0);
@@ -712,19 +679,49 @@ void showContextMenu(HWND hwnd, POINT p, UINT alignFlags = 0) {
     g_contextOpen = false;
     DestroyMenu(m);
 
-    if (cmd == 1) { g_expanded = !g_expanded; setWindowSize(); }
-    if (cmd == 6) positionRight(hwnd);
-    if (cmd == 3) toggleIsland(hwnd);
-    if (cmd == 4) {
+    switch (cmd) {
+    case MENU_TOGGLE_EXPANDED: g_expanded = !g_expanded; setWindowSize(); break;
+    case MENU_RESET_POSITION: positionRight(hwnd); break;
+    case MENU_HIDE: toggleIsland(hwnd); break;
+    case MENU_AUTO_HIDE:
         g_autoHideOnHover = !g_autoHideOnHover;
         saveAutoHideOnHover(g_autoHideOnHover);
         cancelHover(hwnd);
+        break;
+    case MENU_ABOUT: showAbout(); break;
+    case MENU_EXIT: DestroyWindow(hwnd); break;
+    default:
+        if (cmd >= MENU_HOTKEY_FIRST && cmd < MENU_HOTKEY_FIRST + static_cast<int>(ARRAYSIZE(HOTKEYS)))
+            selectHotkey(hwnd, cmd - MENU_HOTKEY_FIRST);
     }
-    if (cmd >= 100 && cmd < 100 + static_cast<int>(ARRAYSIZE(HOTKEYS))) selectHotkey(hwnd, cmd - 100);
-
-    if (cmd == 5) showAbout();
-    if (cmd == 2) DestroyWindow(hwnd);
 }
+
+// Display off or session locked: nobody can see the island, so release
+// telemetry and stop animating, as during suspension.
+void setPresentationPaused(HWND hwnd, bool& reason, bool paused) {
+    if (reason == paused) return;
+    reason = paused;
+    if (presentationPaused()) {
+        publishSamplingPolicy(IsWindowVisible(hwnd) != FALSE);
+        stopAnimation(hwnd);
+    } else {
+        updateSamplingPolicy(hwnd);
+        startAnimation(hwnd);
+        InvalidateRect(hwnd, nullptr, FALSE);
+    }
+}
+// Input reaching the island proves the display is on and the session unlocked.
+// Recovers if Windows ever drops the matching resume notification.
+void confirmPresented(HWND hwnd) {
+    if (!g_displayOff && !g_sessionLocked) return;
+    g_displayOff = g_sessionLocked = false;
+    if (presentationPaused()) return;
+    updateSamplingPolicy(hwnd);
+    startAnimation(hwnd);
+    InvalidateRect(hwnd, nullptr, FALSE);
+}
+HPOWERNOTIFY g_displayNotification;
+bool g_sessionNotificationRegistered = false;
 
 LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     switch (msg) {
@@ -737,6 +734,15 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             g_suspended = true;
             publishSamplingPolicy(false);
             stopAnimation(hwnd);
+        } else if (wp == PBT_POWERSETTINGCHANGE) {
+            const auto* setting = reinterpret_cast<const POWERBROADCAST_SETTING*>(lp);
+            if (setting && IsEqualGUID(setting->PowerSetting, GUID_SESSION_DISPLAY_STATUS) &&
+                setting->DataLength >= sizeof(DWORD)) {
+                DWORD state = 0;
+                memcpy(&state, setting->Data, sizeof(state));
+                // 0 = off, 1 = on, 2 = dimmed (still visible).
+                setPresentationPaused(hwnd, g_displayOff, state == 0);
+            }
         } else if (wp == PBT_APMPOWERSTATUSCHANGE || wp == PBT_APMRESUMEAUTOMATIC || wp == PBT_APMRESUMESUSPEND) {
             g_suspended = false;
             updateSamplingPolicy(hwnd);
@@ -744,12 +750,17 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             InvalidateRect(hwnd, nullptr, FALSE);
         }
         return TRUE;
+    case WM_WTSSESSION_CHANGE:
+        if (wp == WTS_SESSION_LOCK) setPresentationPaused(hwnd, g_sessionLocked, true);
+        else if (wp == WTS_SESSION_UNLOCK) setPresentationPaused(hwnd, g_sessionLocked, false);
+        return 0;
     case WM_STATS_READY:
         if (IsWindowVisible(hwnd)) {
             refreshDisplayCache();
         }
         return 0;
     case WM_SHOW_EXISTING_ISLAND:
+        confirmPresented(hwnd);
         showIsland(hwnd);
         InvalidateRect(hwnd, nullptr, FALSE);
         return 0;
@@ -759,7 +770,11 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         // A logon task can begin before the desktop or telemetry provider is
         // fully ready. Reconcile actual visibility to recover a missed initial
         // show notification, without waking a worker whose policy is unchanged.
-        SetTimer(hwnd, TELEMETRY_HEALTH_TIMER_ID, 15000, nullptr);
+        SetCoalescableTimer(hwnd, TELEMETRY_HEALTH_TIMER_ID, TELEMETRY_HEALTH_INTERVAL_MS, nullptr, 5000);
+        // Both deliver the current state immediately after registration.
+        g_displayNotification = RegisterPowerSettingNotification(hwnd, &GUID_SESSION_DISPLAY_STATUS,
+            DEVICE_NOTIFY_WINDOW_HANDLE);
+        g_sessionNotificationRegistered = WTSRegisterSessionNotification(hwnd, NOTIFY_FOR_THIS_SESSION) != FALSE;
         g_hotkeyChoice = loadHotkeyChoice();
         g_autoHideOnHover = loadAutoHideOnHover();
         if (!registerToggleHotkey(hwnd, g_hotkeyChoice))
@@ -769,10 +784,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         return 0;
 
     case WM_TIMER:
-        if(wp==STATS_TIMER_ID) {
-
-            refreshDisplayCache();
-        } else if(wp==ANIMATION_TIMER_ID) {
+        if(wp==ANIMATION_TIMER_ID) {
               // A layered, non-activating HWND can miss a leave notification
               // after being shown under a stationary cursor. Reconcile on the
               // existing animation tick so the next real entry always rearms.
@@ -811,6 +823,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         }
         return 0;
     case WM_HOTKEY:
+        confirmPresented(hwnd);
         if (wp == HOTKEY_ID) {
             toggleIsland(hwnd);
         } else if (wp == CONTEXT_MENU_HOTKEY_ID) {
@@ -836,10 +849,11 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         return 0;
 
     case WM_MOUSEMOVE:
+        confirmPresented(hwnd);
         if(g_dragging && (wp & MK_LBUTTON)) {
             POINT p{GET_X_LPARAM(lp),GET_Y_LPARAM(lp)}; ClientToScreen(hwnd,&p);
-            SetWindowPos(hwnd,nullptr,p.x-g_dragStart.x,p.y-g_dragStart.y,0,0,SWP_NOZORDER|SWP_NOSIZE|SWP_NOACTIVATE);
-            ensureTopmostVisible(hwnd);
+            // A visible, dragged island is never hidden; move and keep it topmost in one call.
+            SetWindowPos(hwnd,HWND_TOPMOST,p.x-g_dragStart.x,p.y-g_dragStart.y,0,0,SWP_NOSIZE|SWP_NOACTIVATE);
         } else if(g_autoHideOnHover && !g_trackingMouse && !g_contextOpen) {
             TRACKMOUSEEVENT tme{sizeof(tme),TME_LEAVE,hwnd,0};
             TrackMouseEvent(&tme);
@@ -864,9 +878,6 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         return 0;
     }
 
-    case WM_COMMAND:
-        if (LOWORD(wp) == 5) { showAbout(); return 0; }
-        break;
 
     case WM_UPDATEUISTATE:
         // Mouse input can hide accelerators again after the menu-opening request.
@@ -892,7 +903,10 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
 
     case WM_DESTROY:
         if (g_stopEvent) SetEvent(g_stopEvent);
-        KillTimer(hwnd, STATS_TIMER_ID);
+        if (g_displayNotification) UnregisterPowerSettingNotification(g_displayNotification);
+        g_displayNotification = nullptr;
+        if (g_sessionNotificationRegistered) WTSUnRegisterSessionNotification(hwnd);
+        g_sessionNotificationRegistered = false;
         KillTimer(hwnd, HOVER_TIMER_ID);
         KillTimer(hwnd, RESHOW_TIMER_ID);
         KillTimer(hwnd, ANIMATION_TIMER_ID);
@@ -1013,6 +1027,11 @@ int WINAPI wWinMain(HINSTANCE h, HINSTANCE, LPWSTR, int) {
     try {
         g_worker = std::thread([] {
             SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_BELOW_NORMAL);
+            // EcoQoS: background sampling may run on efficient cores at lower
+            // clocks. Best effort; unsupported Windows versions ignore it.
+            THREAD_POWER_THROTTLING_STATE throttling{THREAD_POWER_THROTTLING_CURRENT_VERSION,
+                THREAD_POWER_THROTTLING_EXECUTION_SPEED, THREAD_POWER_THROTTLING_EXECUTION_SPEED};
+            SetThreadInformation(GetCurrentThread(), ThreadPowerThrottling, &throttling, sizeof(throttling));
             try {
                 runTelemetryWorker<Telemetry>();
             } catch (...) {

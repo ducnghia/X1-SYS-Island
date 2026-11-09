@@ -372,6 +372,98 @@ void testRendering() {
     SetWindowPos(g_hwnd, nullptr, -30000, -30000, 0, 0, SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
     puts("PASS: exact damage, animation-only draws, pixel-equivalent repair, exposure, resize and stable backbuffer handles.");
 }
+void testGlowEquivalence() {
+    // The halo's ExtTextOutW fast path must match the DrawTextW it replaced,
+    // for short labels, ellipsized labels and every halo offset.
+    HDC screen = GetDC(nullptr);
+    BackBuffer fast, reference;
+    assert(fast.ensure(screen, 160, COMPACT_HEIGHT) && reference.ensure(screen, 160, COMPACT_HEIGHT));
+    const RECT cell = COMPACT_CELLS[0].label;
+    const RECT all{0, 0, 160, COMPACT_HEIGHT};
+    for (const std::wstring& label : {std::wstring(L"CPU"), std::wstring(L"Core i7"),
+            std::wstring(L"Core Ultra 7"), std::wstring(L"Core Ultra 9 Extreme"), g_cpuIdentity.compact}) {
+        for (HDC dc : {fast.dc, reference.dc}) {
+            SelectObject(dc, g_metricsFont);
+            SetBkMode(dc, TRANSPARENT);
+            SetTextColor(dc, RGB(0, 128, 255));
+        }
+        const auto layout = layoutGlowLabel(fast.dc, label, cell);
+        assert(layout.font == g_metricsFont);
+        for (int dy = -2; dy <= 2; ++dy) {
+            for (int dx = -2; dx <= 2; ++dx) {
+                FillRect(fast.dc, &all, g_backgroundBrush);
+                FillRect(reference.dc, &all, g_backgroundBrush);
+                drawGlowCopy(fast.dc, layout, cell, dx, dy);
+                RECT shifted = cell;
+                OffsetRect(&shifted, dx, dy);
+                DrawTextW(reference.dc, label.c_str(), -1, &shifted, LABEL_TEXT_FORMAT);
+                for (int y = 0; y < COMPACT_HEIGHT; ++y)
+                    for (int x = 0; x < 160; ++x)
+                        assert(GetPixel(fast.dc, x, y) == GetPixel(reference.dc, x, y));
+            }
+        }
+    }
+    fast.release(); reference.release();
+    ReleaseDC(nullptr, screen);
+    puts("PASS: cached CPU-label halo is pixel-identical to DrawTextW for all offsets.");
+}
+
+void sendDisplayState(DWORD state) {
+    BYTE buffer[sizeof(POWERBROADCAST_SETTING) + sizeof(DWORD)]{};
+    auto* setting = reinterpret_cast<POWERBROADCAST_SETTING*>(buffer);
+    setting->PowerSetting = GUID_SESSION_DISPLAY_STATUS;
+    setting->DataLength = sizeof(DWORD);
+    memcpy(setting->Data, &state, sizeof(state));
+    SendMessageW(g_hwnd, WM_POWERBROADCAST, PBT_POWERSETTINGCHANGE, reinterpret_cast<LPARAM>(buffer));
+}
+bool animationRunning() {
+    // KillTimer reports whether the timer existed; restore it if it did.
+    const bool running = KillTimer(g_hwnd, ANIMATION_TIMER_ID) != FALSE;
+    if (running) startAnimation(g_hwnd);
+    return running;
+}
+void testPresentationPause() {
+    assert(IsWindowVisible(g_hwnd) && g_sampling.load() && animationRunning());
+    const auto releases = samplingPolicy().releaseEpoch;
+    sendDisplayState(2); // Dimmed is still visible.
+    assert(g_sampling.load() && animationRunning());
+    sendDisplayState(0);
+    assert(!g_sampling.load() && !animationRunning());
+    assert(samplingPolicy().mode == SamplingMode::Released && samplingPolicy().releaseEpoch == releases + 1);
+    // The health watchdog must not resume sampling while the display is off.
+    SendMessageW(g_hwnd, WM_TIMER, TELEMETRY_HEALTH_TIMER_ID, 0);
+    assert(!g_sampling.load());
+    startAnimation(g_hwnd);
+    assert(!animationRunning());
+    sendDisplayState(1);
+    assert(g_sampling.load() && animationRunning());
+
+    SendMessageW(g_hwnd, WM_WTSSESSION_CHANGE, WTS_SESSION_LOCK, 0);
+    assert(!g_sampling.load() && !animationRunning());
+    sendDisplayState(0);
+    sendDisplayState(1); // Display returns on the lock screen: stay paused.
+    assert(!g_sampling.load() && !animationRunning());
+    SendMessageW(g_hwnd, WM_WTSSESSION_CHANGE, WTS_SESSION_UNLOCK, 0);
+    assert(g_sampling.load() && animationRunning());
+    assert(!g_displayOff && !g_sessionLocked);
+    // A dropped unlock/display-on notification is recovered by user input.
+    SendMessageW(g_hwnd, WM_WTSSESSION_CHANGE, WTS_SESSION_LOCK, 0);
+    sendDisplayState(0);
+    assert(!g_sampling.load());
+    testInside = true;
+    SendMessageW(g_hwnd, WM_MOUSEMOVE, 0, MAKELPARAM(60, 20));
+    assert(g_sampling.load() && animationRunning() && !g_displayOff && !g_sessionLocked);
+    leave();
+    // Suspension is not cleared by input; only the power resume does that.
+    SendMessageW(g_hwnd, WM_POWERBROADCAST, PBT_APMSUSPEND, 0);
+    SendMessageW(g_hwnd, WM_WTSSESSION_CHANGE, WTS_SESSION_LOCK, 0);
+    SendMessageW(g_hwnd, WM_SHOW_EXISTING_ISLAND, 0, 0);
+    assert(!g_sampling.load() && !g_sessionLocked && g_suspended);
+    SendMessageW(g_hwnd, WM_POWERBROADCAST, PBT_APMRESUMEAUTOMATIC, 0);
+    assert(g_sampling.load() && animationRunning());
+    puts("PASS: display off and session lock release sampling and stop animation; dimmed stays active.");
+}
+
 #pragma comment(lib, "version.lib")
 void testMenuUiState() {
     const UINT stateFlags = UISF_HIDEACCEL | UISF_HIDEFOCUS | UISF_ACTIVE;
@@ -468,6 +560,7 @@ int main() {
     assert(g_hwnd);
     testMenuUiState();
     testAboutVersion();
+    testGlowEquivalence();
     g_snapshot.cpu = 100; g_snapshot.gpu = 100; g_snapshot.temperature = 125;
     g_snapshot.tjMax = 125; g_snapshot.distanceToTjMax = 0;
     g_snapshot.used = g_snapshot.total = 64ULL * 1024 * 1024 * 1024;
@@ -505,8 +598,9 @@ int main() {
         }
         SelectObject(dc, previous);
     };
+    // The first label is the detected CPU identity, which varies by machine.
     assert((EXPANDED_LABELS == std::array<std::wstring, 9>{
-        L"CPU", L"CPU Package", L"TjMax", L"iGPU", L"RAM", L"RAM Usage",
+        g_cpuIdentity.expanded, L"CPU Package", L"TjMax", L"iGPU", L"RAM", L"RAM Usage",
         L"Fan Mode", L"Fan 1 (rpm)", L"Fan 2 (rpm)"}));
     assert(g_expandedParts[1] == L"125\u00B0C" && g_expandedParts[2] == L"125\u00B0C");
     assert(g_expandedParts[4] == L"64.0/64.0 GiB");
@@ -660,6 +754,7 @@ int main() {
     SendMessageW(g_hwnd, WM_POWERBROADCAST, PBT_APMRESUMEAUTOMATIC, 0);
     assert(g_sampling.load());
     assert(g_sampleInterval.load() == (g_onBattery ? 3000u : 1000u));
+    testPresentationPause();
     g_onBattery = true;
     startAnimation(g_hwnd);
     leave(); enter(); pump(1200);
